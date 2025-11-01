@@ -1,0 +1,51 @@
+name: nurse_tracking_app
+description: Hospital nurse tracking application with GPS and scheduling
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Backend
+  supabase_flutter: ^2.0.0
+
+  # Location & Maps
+  geolocator: ^10.1.0
+  geocoding: ^3.0.0
+  flutter_map: ^6.1.0
+  latlong2: ^0.9.1
+  flutter_polyline_points: ^2.0.0
+  google_maps_flutter: ^2.5.3
+  permission_handler: ^11.3.0
+
+  # UI & Utils
+  intl: ^0.19.0
+  image_picker: ^1.0.4
+  cached_network_image: ^3.3.0
+  flutter_local_notifications: ^17.2.1
+  fl_chart: ^0.66.1
+  provider: ^6.1.1
+  flutter_staggered_animations: ^1.1.1
+  url_launcher: ^6.2.3
+  shared_preferences: ^2.2.3
+
+  # Firebase
+  firebase_core: ^2.24.2
+  firebase_messaging: ^14.9.0
+
+  # Email
+  mailer: ^6.0.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
