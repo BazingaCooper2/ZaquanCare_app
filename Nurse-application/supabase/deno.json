@@ -1,0 +1,44 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "strict": true,
+    "lib": [
+      "esnext",
+      "dom",
+      "deno.ns",
+      "deno.unstable"
+    ],
+    "types": []
+  },
+  "imports": {
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2"
+  },
+  "fmt": {
+    "options": {
+      "useTabs": false,
+      "lineWidth": 80,
+      "indentWidth": 2,
+      "singleQuote": true
+    },
+    "files": {
+      "include": [
+        "supabase/functions"
+      ]
+    }
+  },
+  "lint": {
+    "files": {
+      "include": [
+        "supabase/functions"
+      ]
+    },
+    "rules": {
+      "tags": [
+        "recommended"
+      ]
+    }
+  },
+  "tasks": {
+    "serve-chatbot": "supabase functions serve chatbot-handle-request --env-file .env"
+  }
+}

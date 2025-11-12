@@ -1,5 +1,7 @@
 import 'package:mailer/mailer.dart';
 import 'package:mailer/smtp_server.dart';
+import 'dart:typed_data';
+import 'dart:async';
 
 class EmailService {
   // Gmail SMTP configuration
@@ -22,6 +24,7 @@ class EmailService {
     required String description,
     required String severity,
     required String status,
+    Uint8List? signatureImage,
   }) async {
     try {
       // Create SMTP server configuration
@@ -48,6 +51,16 @@ class EmailService {
           severity: severity,
           status: status,
         );
+
+      // Attach signature image if provided
+      if (signatureImage != null) {
+        message.attachments.add(
+          StreamAttachment(
+            Stream.value(signatureImage),
+            'signature.png',
+          ),
+        );
+      }
 
       // Send the email
       final sendReport = await send(message, smtpServer);

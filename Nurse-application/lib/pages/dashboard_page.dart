@@ -12,6 +12,7 @@ import 'time_tracking_page.dart';
 import 'login_page.dart';
 import 'reports_page.dart'; // ✅ Added import
 import 'injury_report_form.dart'; // ✅ Added import for Injury Report Form
+import '../widgets/chatbot_button.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -150,18 +151,19 @@ class _DashboardPageState extends State<DashboardPage> {
       ),
       body: Stack(
         children: [
-          Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Theme.of(context).colorScheme.primary.withOpacity(0.05),
-                  Theme.of(context).colorScheme.surface,
-                ],
+          Positioned.fill(
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Theme.of(context).colorScheme.primary.withOpacity(0.05),
+                    Theme.of(context).colorScheme.surface,
+                  ],
+                ),
               ),
-            ),
-            child: Padding(
+              child: Padding(
               padding: const EdgeInsets.all(16.0),
               child: AnimationLimiter(
                 child: GridView.count(
@@ -245,6 +247,7 @@ class _DashboardPageState extends State<DashboardPage> {
                 ),
               ),
             ),
+            ),
           ),
           Positioned(
             bottom: 24,
@@ -277,6 +280,7 @@ class _DashboardPageState extends State<DashboardPage> {
               ),
             ),
           ),
+          const ChatbotButton(),
         ],
       ),
     );

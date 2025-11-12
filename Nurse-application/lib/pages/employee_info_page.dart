@@ -69,7 +69,8 @@ class _EmployeeInfoPageState extends State<EmployeeInfoPage> {
       // Reload employee data
       final response = await supabase
           .from('employee')
-          .select('emp_id, first_name, last_name, designation, phone, email, address, status, skills, qualifications, image_url')
+          .select(
+              'emp_id, first_name, last_name, designation, phone, email, address, status, skills, qualifications, image_url')
           .eq('emp_id', empId)
           .single();
 

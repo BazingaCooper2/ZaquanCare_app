@@ -14,6 +14,7 @@ dependencies:
 
   # Backend
   supabase_flutter: ^2.0.0
+  http: ^1.1.0
 
   # Location & Maps
   geolocator: ^10.1.0
@@ -34,6 +35,7 @@ dependencies:
   flutter_staggered_animations: ^1.1.1
   url_launcher: ^6.2.3
   shared_preferences: ^2.2.3
+  signature: ^5.4.0
 
   # Firebase
   firebase_core: ^2.24.2

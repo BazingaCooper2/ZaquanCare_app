@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'dart:typed_data';
+import 'package:signature/signature.dart';
 import '../main.dart';
 import '../services/email_service.dart';
+import '../services/session.dart';
 
 class InjuryReportForm extends StatefulWidget {
   const InjuryReportForm({super.key});
@@ -26,12 +30,22 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
 
   bool _isSubmitting = false;
 
+  // Signature controller and state
+  final SignatureController _signatureController = SignatureController(
+    penStrokeWidth: 3,
+    penColor: Colors.black,
+    exportBackgroundColor: Colors.white,
+  );
+  Uint8List? _signatureImage;
+  String? _uploadedSignatureUrl;
+
   @override
   void dispose() {
     _injuredPersonController.dispose();
     _reportingEmployeeController.dispose();
     _locationController.dispose();
     _descriptionController.dispose();
+    _signatureController.dispose();
     super.dispose();
   }
 
@@ -44,6 +58,25 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
     );
     if (picked != null && picked != _selectedDate) {
       setState(() => _selectedDate = picked);
+    }
+  }
+
+  Future<String?> _uploadSignatureToSupabase(Uint8List signatureBytes) async {
+    try {
+      final supabase = Supabase.instance.client;
+      final fileName = 'signature_${DateTime.now().millisecondsSinceEpoch}.png';
+
+      await supabase.storage
+          .from('injury_signatures')
+          .uploadBinary(fileName, signatureBytes);
+
+      final publicUrl =
+          supabase.storage.from('injury_signatures').getPublicUrl(fileName);
+      print('✅ Signature uploaded: $publicUrl');
+      return publicUrl;
+    } catch (e) {
+      print('❌ Error uploading signature: $e');
+      return null;
     }
   }
 
@@ -63,9 +96,31 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
       return;
     }
 
+    if (_signatureImage == null) {
+      context.showSnackBar('Please sign before submitting!', isError: true);
+      return;
+    }
+
     setState(() => _isSubmitting = true);
 
     try {
+      final empId = await SessionManager.getEmpId();
+      if (empId == null) {
+        context.showSnackBar('You must be logged in to submit a report.',
+            isError: true);
+        setState(() => _isSubmitting = false);
+        return;
+      }
+
+      // ✅ Upload signature to Supabase Storage
+      final uploadedUrl = await _uploadSignatureToSupabase(_signatureImage!);
+      if (uploadedUrl == null) {
+        context.showSnackBar('Failed to upload signature!', isError: true);
+        setState(() => _isSubmitting = false);
+        return;
+      }
+      _uploadedSignatureUrl = uploadedUrl;
+
       final data = {
         'date': DateFormat('yyyy-MM-dd').format(_selectedDate!),
         'injured_person': _injuredPersonController.text.trim(),
@@ -74,12 +129,15 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
         'description': _descriptionController.text.trim(),
         'severity': _selectedSeverity,
         'status': _selectedStatus,
+        'emp_id': empId, // ✅ Employee ID from session (matches bigint in table)
+        'signature_url': _uploadedSignatureUrl, // ✅ Signature URL from storage
       };
 
-      // Insert into database
+      // ✅ Insert into Supabase
+      // Note: Supabase insert() throws exceptions on error, doesn't return error object
       await supabase.from('injury_reports').insert(data);
 
-      // Send email to manager
+      // ✅ Email notification
       final emailSent = await EmailService.sendInjuryReport(
         date: DateFormat('yyyy-MM-dd').format(_selectedDate!),
         injuredPerson: _injuredPersonController.text.trim(),
@@ -88,19 +146,19 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
         description: _descriptionController.text.trim(),
         severity: _selectedSeverity!,
         status: _selectedStatus!,
+        signatureImage: _signatureImage, // ✅ Attach signature image in email
       );
 
       if (emailSent) {
-        context
-            .showSnackBar('Injury report submitted and email sent to manager');
-      } else {
         context.showSnackBar(
-            'Report submitted but failed to send email notification');
+            '✅ Injury report submitted & email sent to supervisor');
+      } else {
+        context.showSnackBar('⚠️ Report saved but failed to send email');
       }
 
       _resetForm();
     } catch (e) {
-      context.showSnackBar('Failed to submit report: $e', isError: true);
+      context.showSnackBar('❌ Failed to submit report: $e', isError: true);
     } finally {
       setState(() => _isSubmitting = false);
     }
@@ -112,17 +170,20 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
     _reportingEmployeeController.clear();
     _locationController.clear();
     _descriptionController.clear();
+    _signatureController.clear();
     setState(() {
       _selectedDate = null;
       _selectedSeverity = null;
       _selectedStatus = null;
+      _signatureImage = null;
+      _uploadedSignatureUrl = null;
     });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      extendBodyBehindAppBar: true, // ✅ Transparent header effect
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
         title: const Text(
           'Injury Report Form',
@@ -132,17 +193,14 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
           ),
         ),
         centerTitle: true,
-        backgroundColor: Colors.transparent, // ✅ Transparent background
-        elevation: 0, // ✅ No shadow
+        backgroundColor: Colors.transparent,
+        elevation: 0,
         iconTheme: const IconThemeData(color: Colors.black),
       ),
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: [
-              Color(0xFFEAF3FF), // light nurse blue top
-              Color(0xFFFFFFFF), // white bottom
-            ],
+            colors: [Color(0xFFEAF3FF), Color(0xFFFFFFFF)],
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
           ),
@@ -162,59 +220,26 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Date
-                      Text(
-                        'Date',
-                        style:
-                            Theme.of(context).textTheme.titleMedium?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                ),
-                      ),
-                      const SizedBox(height: 8),
-                      InkWell(
-                        onTap: () => _selectDate(context),
-                        child: InputDecorator(
-                          decoration: InputDecoration(
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            suffixIcon: const Icon(Icons.calendar_today),
-                          ),
-                          child: Text(
-                            _selectedDate == null
-                                ? 'Select Date'
-                                : DateFormat('yyyy-MM-dd')
-                                    .format(_selectedDate!),
-                          ),
-                        ),
-                      ),
+                      _buildDatePicker(context),
                       const SizedBox(height: 16),
-
-                      // Injured Person
                       _buildTextField(
                         controller: _injuredPersonController,
                         label: 'Injured Person',
                         validatorMsg: 'Please enter the injured person',
                       ),
                       const SizedBox(height: 16),
-
-                      // Reporting Employee
                       _buildTextField(
                         controller: _reportingEmployeeController,
                         label: 'Reporting Employee',
                         validatorMsg: 'Please enter the reporting employee',
                       ),
                       const SizedBox(height: 16),
-
-                      // Location
                       _buildTextField(
                         controller: _locationController,
                         label: 'Location',
                         validatorMsg: 'Please enter the location',
                       ),
                       const SizedBox(height: 16),
-
-                      // Description
                       _buildTextField(
                         controller: _descriptionController,
                         label: 'Description',
@@ -222,8 +247,6 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
                         maxLines: 4,
                       ),
                       const SizedBox(height: 16),
-
-                      // Severity
                       _buildDropdown(
                         label: 'Severity',
                         value: _selectedSeverity,
@@ -232,8 +255,6 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
                             setState(() => _selectedSeverity = value),
                       ),
                       const SizedBox(height: 16),
-
-                      // Status
                       _buildDropdown(
                         label: 'Status',
                         value: _selectedStatus,
@@ -241,9 +262,56 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
                         onChanged: (value) =>
                             setState(() => _selectedStatus = value),
                       ),
+                      const SizedBox(height: 20),
+                      const Text(
+                        'Employee Signature',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                      const SizedBox(height: 10),
+                      Container(
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey.shade400),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Column(
+                          children: [
+                            Signature(
+                              controller: _signatureController,
+                              height: 150,
+                              backgroundColor: Colors.grey.shade100,
+                            ),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                TextButton.icon(
+                                  icon: const Icon(Icons.delete_outline),
+                                  label: const Text('Clear'),
+                                  onPressed: () => _signatureController.clear(),
+                                ),
+                                TextButton.icon(
+                                  icon: const Icon(Icons.save_alt),
+                                  label: const Text('Save'),
+                                  onPressed: () async {
+                                    final signature = await _signatureController.toPngBytes();
+                                    if (signature != null) {
+                                      setState(() => _signatureImage = signature);
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(content: Text('Signature saved!')),
+                                      );
+                                    }
+                                  },
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (_signatureImage != null) ...[
+                        const SizedBox(height: 10),
+                        const Text('Preview:'),
+                        Image.memory(_signatureImage!, height: 100),
+                      ],
                       const SizedBox(height: 24),
-
-                      // Submit Button
                       SizedBox(
                         width: double.infinity,
                         child: ElevatedButton(
@@ -259,10 +327,8 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
                           child: _isSubmitting
                               ? const CircularProgressIndicator(
                                   color: Colors.white)
-                              : const Text(
-                                  'Submit Report',
-                                  style: TextStyle(fontSize: 16),
-                                ),
+                              : const Text('Submit Report',
+                                  style: TextStyle(fontSize: 16)),
                         ),
                       ),
                     ],
@@ -276,7 +342,37 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
     );
   }
 
-  // Custom textfield builder for consistency
+  Widget _buildDatePicker(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Date',
+          style: Theme.of(context)
+              .textTheme
+              .titleMedium
+              ?.copyWith(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        InkWell(
+          onTap: () => _selectDate(context),
+          child: InputDecorator(
+            decoration: InputDecoration(
+              border:
+                  OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              suffixIcon: const Icon(Icons.calendar_today),
+            ),
+            child: Text(
+              _selectedDate == null
+                  ? 'Select Date'
+                  : DateFormat('yyyy-MM-dd').format(_selectedDate!),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildTextField({
     required TextEditingController controller,
     required String label,
@@ -288,9 +384,7 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
       maxLines: maxLines,
       decoration: InputDecoration(
         labelText: label,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       ),
       validator: (value) {
         if (value == null || value.trim().isEmpty) return validatorMsg;
@@ -299,7 +393,6 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
     );
   }
 
-  // Custom dropdown builder
   Widget _buildDropdown({
     required String label,
     required String? value,
@@ -310,15 +403,10 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
       value: value,
       decoration: InputDecoration(
         labelText: label,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       ),
       items: options
-          .map((option) => DropdownMenuItem(
-                value: option,
-                child: Text(option),
-              ))
+          .map((option) => DropdownMenuItem(value: option, child: Text(option)))
           .toList(),
       onChanged: onChanged,
       validator: (value) =>

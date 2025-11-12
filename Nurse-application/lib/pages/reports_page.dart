@@ -4,6 +4,7 @@ import 'package:fl_chart/fl_chart.dart';
 import '../main.dart';
 import '../models/employee.dart';
 import '../models/shift.dart';
+import '../models/daily_shift.dart';
 import 'package:nurse_tracking_app/services/session.dart';
 
 class ReportsPage extends StatefulWidget {
@@ -23,8 +24,6 @@ class _ReportsPageState extends State<ReportsPage> {
   double _totalHours = 0;
   double _overtimeHours = 0;
   double _monthlyHours = 0;
-  double _vacationLeft = 0;
-  double _vacationTaken = 0;
   List<double> _dailyHours = [];
   List<String> _days = [];
 
@@ -44,7 +43,8 @@ class _ReportsPageState extends State<ReportsPage> {
       if (empId == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Session expired. Please login again.')),
+            const SnackBar(
+                content: Text('Session expired. Please login again.')),
           );
         }
         setState(() {
@@ -53,18 +53,13 @@ class _ReportsPageState extends State<ReportsPage> {
         return;
       }
 
-      // Load shifts data
-      final shiftsResponse = await supabase
-          .from('shift')
-          .select()
-          .eq('emp_id', empId);
+      // Load shift data from shift table for status counts
+      final shiftsResponse =
+          await supabase.from('shift').select().eq('emp_id', empId);
 
       int completed = 0;
       int inProgress = 0;
       int cancelled = 0;
-      double totalHours = 0;
-      double overtimeHours = 0;
-      double monthlyHours = 0;
 
       for (final shiftData in shiftsResponse) {
         final shift = Shift.fromJson(shiftData);
@@ -81,34 +76,46 @@ class _ReportsPageState extends State<ReportsPage> {
             cancelled++;
             break;
         }
+      }
 
-        // Calculate hours
-        if (shift.durationHours != null) {
-          totalHours += shift.durationHours!;
+      // Load daily_shift summary data
+      final dailyShiftsResponse =
+          await supabase.from('daily_shift').select().eq('emp_id', empId);
+
+      double totalHours = 0;
+      double overtimeHours = 0;
+      double monthlyHours = 0;
+
+      for (final dailyShiftData in dailyShiftsResponse) {
+        final dailyShift = DailyShift.fromJson(dailyShiftData);
+
+        // Sum total hours (convert from bigint to double)
+        if (dailyShift.dailyHrs != null) {
+          totalHours += dailyShift.dailyHrs!.toDouble();
 
           // Check if it's today's shift
-          if (shift.date != null && shift.date == today) {
-            if (shift.overtimeHours != null) {
-              overtimeHours += shift.overtimeHours!;
+          if (dailyShift.shiftDate == today) {
+            if (dailyShift.dailyHrs! > 8) {
+              overtimeHours += dailyShift.dailyHrs!.toDouble() - 8;
             }
           }
 
           // Check if it's this month's shift
-          if (shift.date != null && shift.date!.compareTo(startOfMonth) >= 0) {
-            monthlyHours += shift.durationHours!;
+          if (dailyShift.shiftDate.compareTo(startOfMonth) >= 0) {
+            monthlyHours += dailyShift.dailyHrs!.toDouble();
           }
         }
       }
 
-      // Load daily hours for the past 7 days from shifts
+      // Load daily hours for the past 7 days from daily_shift
       final startDate = DateTime.now().subtract(const Duration(days: 7));
       final startDateStr = DateFormat('yyyy-MM-dd').format(startDate);
 
-      final weeklyShifts = await supabase
-          .from('shift')
+      final weeklyDailyShifts = await supabase
+          .from('daily_shift')
           .select()
           .eq('emp_id', empId)
-          .gte('date', startDateStr);
+          .gte('shift_date', startDateStr);
 
       Map<String, double> dailyHoursMap = {};
       for (int i = 0; i < 7; i++) {
@@ -117,12 +124,13 @@ class _ReportsPageState extends State<ReportsPage> {
         dailyHoursMap[dateStr] = 0.0;
       }
 
-      for (final shiftData in weeklyShifts) {
-        final shift = Shift.fromJson(shiftData);
-        if (shift.durationHours != null && shift.date != null) {
-          if (dailyHoursMap.containsKey(shift.date!)) {
-            dailyHoursMap[shift.date!] =
-                dailyHoursMap[shift.date!]! + shift.durationHours!;
+      for (final dailyShiftData in weeklyDailyShifts) {
+        final dailyShift = DailyShift.fromJson(dailyShiftData);
+        if (dailyShift.dailyHrs != null) {
+          if (dailyHoursMap.containsKey(dailyShift.shiftDate)) {
+            dailyHoursMap[dailyShift.shiftDate] =
+                dailyHoursMap[dailyShift.shiftDate]! +
+                    dailyShift.dailyHrs!.toDouble();
           }
         }
       }
@@ -144,8 +152,6 @@ class _ReportsPageState extends State<ReportsPage> {
         _totalHours = totalHours;
         _overtimeHours = overtimeHours;
         _monthlyHours = monthlyHours;
-        _vacationLeft = 0.0;
-        _vacationTaken = 0.0;
         _dailyHours = dailyHours;
         _days = days;
         _loading = false;

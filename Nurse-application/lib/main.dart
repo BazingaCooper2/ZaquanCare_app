@@ -1,19 +1,26 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:nurse_tracking_app/pages/splash_page.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:provider/provider.dart';
-import 'providers/theme_provider.dart';
-
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 
-/// 🔹 Background message handler (must be top-level or static)
+import 'providers/theme_provider.dart';
+import 'pages/splash_page.dart';
+
+/// ✅ Global Supabase client
+late final SupabaseClient supabase;
+
+/// ✅ Global notifications plugin
+final FlutterLocalNotificationsPlugin localNotifs =
+    FlutterLocalNotificationsPlugin();
+
+/// ✅ Top-level FCM background message handler (required by Firebase)
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
-  debugPrint('📩 Handling a background message: ${message.messageId}');
+  debugPrint('📩 Handling background message: ${message.messageId}');
 
   await localNotifs.show(
     message.hashCode,
@@ -30,13 +37,6 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   );
 }
 
-/// 🔹 Global Supabase client
-final supabase = Supabase.instance.client;
-
-/// 🔹 Global notifications plugin
-final FlutterLocalNotificationsPlugin localNotifs =
-    FlutterLocalNotificationsPlugin();
-
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -47,28 +47,39 @@ Future<void> main() async {
     // ✅ Register background handler
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
-    // ✅ Initialize Supabase
+    // ✅ Initialize Supabase (session persistence is handled automatically)
     await Supabase.initialize(
       url: 'https://asbfhxdomvclwsrekdxi.supabase.co',
       anonKey:
           'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFzYmZoeGRvbXZjbHdzcmVrZHhpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzMjI3OTUsImV4cCI6MjA2OTg5ODc5NX0.0VzbWIc-uxIDhI03g04n8HSPRQ_p01UTJQ1sg8ggigU',
     );
 
-    // Health check before running app
-    final supabase = Supabase.instance.client;
-    final test = await supabase.from('employee').select('email').limit(1);
-    print('🩺 Supabase health check → Found employees: $test');
+    supabase = Supabase.instance.client;
 
-    // ✅ Initialize local notifications
-    await initLocalNotifs();
+    // ✅ Health check (optional, non-blocking)
+    try {
+      final test = await supabase.from('employee').select('email').limit(1);
+      debugPrint('🩺 Supabase OK: Found employees: $test');
+    } catch (e) {
+      debugPrint('⚠️ Supabase health check failed (non-critical): $e');
+    }
 
-    // ✅ Request FCM permissions & log token
-    await requestPermissionAndGetToken();
+    // ✅ Initialize notifications & FCM permissions (non-blocking)
+    try {
+      await _initLocalNotifs();
+    } catch (e) {
+      debugPrint('⚠️ Local notifications init failed (non-critical): $e');
+    }
+
+    try {
+      await _requestPermissionAndGetToken();
+    } catch (e) {
+      debugPrint('⚠️ FCM token request failed (non-critical): $e');
+    }
 
     // ✅ Foreground notifications listener
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       debugPrint('🔥 Foreground message: ${message.data}');
-
       if (message.notification != null) {
         localNotifs.show(
           message.hashCode,
@@ -86,25 +97,27 @@ Future<void> main() async {
       }
     });
 
-    // ✅ Handle notification when tapped from background
+    // ✅ Handle tap on background notification
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
       debugPrint('📲 Notification tapped: ${message.data}');
-      // 👉 You can navigate to a specific page here if needed
+      // You can navigate to a specific page here if needed
     });
-
-    runApp(
-      ChangeNotifierProvider(
-        create: (_) => ThemeProvider(),
-        child: const MyApp(),
-      ),
-    );
   } catch (e, st) {
-    debugPrint("❌ Initialization error: $e\n$st");
+    debugPrint("❌ Critical initialization error: $e\n$st");
+    // Continue anyway - app should still start even if some services fail
   }
+
+  // ✅ Always run the app, even if initialization had errors
+  runApp(
+    ChangeNotifierProvider(
+      create: (_) => ThemeProvider(),
+      child: const MyApp(),
+    ),
+  );
 }
 
-/// 🔹 Local notifications setup
-Future<void> initLocalNotifs() async {
+/// ✅ Local notifications setup
+Future<void> _initLocalNotifs() async {
   const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
   const iosInit = DarwinInitializationSettings();
 
@@ -127,10 +140,9 @@ Future<void> initLocalNotifs() async {
       ?.requestPermissions(alert: true, badge: true, sound: true);
 }
 
-/// 🔹 Request notification permission & print FCM token
-Future<void> requestPermissionAndGetToken() async {
+/// ✅ Request notification permission & get FCM token
+Future<void> _requestPermissionAndGetToken() async {
   FirebaseMessaging messaging = FirebaseMessaging.instance;
-
   NotificationSettings settings = await messaging.requestPermission(
     alert: true,
     badge: true,
@@ -138,10 +150,10 @@ Future<void> requestPermissionAndGetToken() async {
   );
 
   if (settings.authorizationStatus == AuthorizationStatus.authorized) {
-    String? token = await messaging.getToken();
+    final token = await messaging.getToken();
     debugPrint('✅ FCM Token: $token');
   } else {
-    debugPrint('❌ User declined notifications');
+    debugPrint('⚠️ User declined notifications');
   }
 }
 
@@ -152,7 +164,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
     return MaterialApp(
-      title: 'Nurse Tracking App',
+      title: 'Test_app',
       debugShowCheckedModeBanner: false,
       theme: themeProvider.lightTheme,
       darkTheme: themeProvider.darkTheme,

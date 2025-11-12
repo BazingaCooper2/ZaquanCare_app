@@ -13,9 +13,9 @@ class LoginPage extends StatefulWidget {
 
 class _LoginPageState extends State<LoginPage> {
   bool _isLoading = false;
-  late final TextEditingController _emailController = TextEditingController();
-  late final TextEditingController _passwordController =
-      TextEditingController();
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  bool _isPasswordVisible = false;
 
   Future<void> _signIn() async {
     try {
@@ -24,42 +24,64 @@ class _LoginPageState extends State<LoginPage> {
       final email = _emailController.text.trim().toLowerCase();
       final password = _passwordController.text.trim();
 
-      print('🔍 Attempting login for: $email');
+      if (email.isEmpty || password.isEmpty) {
+        context.showSnackBar('Please enter both email and password',
+            isError: true);
+        setState(() => _isLoading = false);
+        return;
+      }
 
-      final response = await supabase
+      print('🔍 Attempting Supabase login for: $email');
+
+      // ✅ Step 1: Authenticate user using Supabase Auth
+      final response = await supabase.auth.signInWithPassword(
+        email: email,
+        password: password,
+      );
+
+      final user = response.user;
+      if (user == null) {
+        context.showSnackBar('Invalid credentials', isError: true);
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      print('✅ Logged in as ${user.email}, UID: ${user.id}');
+
+      // ✅ Step 2: Fetch corresponding employee record
+      // (Make sure your employee table either has auth_id or matching email)
+      final employee = await supabase
           .from('employee')
           .select(
-              'emp_id, first_name, last_name, email, password, designation, image_url, status')
-          .ilike('email', email) // case-insensitive email match
-          .eq('password', password)
+              'emp_id, first_name, last_name, email, designation, image_url, status')
+          .eq('email', user.email ?? email)
           .maybeSingle();
 
-      print('🧾 Supabase response: $response');
+      if (employee == null) {
+        context.showSnackBar(
+            'Employee profile not found in database. Contact admin.',
+            isError: true);
+        await supabase.auth.signOut();
+        setState(() => _isLoading = false);
+        return;
+      }
 
-      if (!mounted) return;
+      // ✅ Step 3: Save employee session locally
+      await SessionManager.saveSession(employee);
 
-      if (response != null) {
-        // Save session with the response data
-        await SessionManager.saveSession(response);
-
-        if (mounted) {
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (_) => const DashboardPage()),
-          );
-        }
-      } else {
-        context.showSnackBar('Invalid email or password', isError: true);
+      // ✅ Step 4: Navigate to dashboard
+      if (mounted) {
+        context.showSnackBar('✅ Login successful');
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const DashboardPage()),
+        );
       }
     } catch (error, stack) {
       print('❌ Login error: $error');
       print(stack);
-      if (mounted) {
-        context.showSnackBar('Unexpected error occurred', isError: true);
-      }
+      context.showSnackBar('Login failed: $error', isError: true);
     } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -74,7 +96,7 @@ class _LoginPageState extends State<LoginPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24.0),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -113,12 +135,21 @@ class _LoginPageState extends State<LoginPage> {
               const SizedBox(height: 16),
               TextFormField(
                 controller: _passwordController,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Password',
-                  prefixIcon: Icon(Icons.lock),
-                  border: OutlineInputBorder(),
+                  prefixIcon: const Icon(Icons.lock),
+                  border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                    onPressed: () =>
+                        setState(() => _isPasswordVisible = !_isPasswordVisible),
+                    icon: Icon(
+                      _isPasswordVisible
+                          ? Icons.visibility_off
+                          : Icons.visibility,
+                    ),
+                  ),
                 ),
-                obscureText: true,
+                obscureText: !_isPasswordVisible,
               ),
               const SizedBox(height: 24),
               ElevatedButton(
@@ -127,7 +158,7 @@ class _LoginPageState extends State<LoginPage> {
                   padding: const EdgeInsets.symmetric(vertical: 16),
                 ),
                 child: _isLoading
-                    ? const CircularProgressIndicator()
+                    ? const CircularProgressIndicator(color: Colors.white)
                     : const Text('Sign In'),
               ),
             ],
