@@ -16,6 +16,7 @@ class Shift {
   final String? shiftStatus;
   final String? shiftProgressNote;
   final Patient? patient;
+  final String? useServiceDuration;
 
   Shift({
     required this.shiftId,
@@ -32,6 +33,7 @@ class Shift {
     this.shiftStatus,
     this.shiftProgressNote,
     this.patient,
+    this.useServiceDuration,
   });
 
   factory Shift.fromJson(Map<String, dynamic> json) {
@@ -42,14 +44,15 @@ class Shift {
       date: json['date'],
       shiftStartTime: json['shift_start_time'],
       shiftEndTime: json['shift_end_time'],
-      taskId: json['Task_ID'],
-      skills: json['Skills'],
-      serviceInstructions: json['Service_Instructions'],
-      tags: json['Tags'],
-      forms: json['Forms'],
+      taskId: json['task_id'],
+      skills: json['skills'],
+      serviceInstructions: json['service_instructions'],
+      tags: json['tags'],
+      forms: json['forms'],
       shiftStatus: json['shift_status'],
       shiftProgressNote: json['shift_progress_note'],
       patient: null, // No patient join for now
+      useServiceDuration: json['use_service_duration'],
     );
   }
 
@@ -61,13 +64,14 @@ class Shift {
       'date': date,
       'shift_start_time': shiftStartTime,
       'shift_end_time': shiftEndTime,
-      'Task_ID': taskId,
-      'Skills': skills,
-      'Service_Instructions': serviceInstructions,
-      'Tags': tags,
-      'Forms': forms,
+      'task_id': taskId,
+      'skills': skills,
+      'service_instructions': serviceInstructions,
+      'tags': tags,
+      'forms': forms,
       'shift_status': shiftStatus,
       'shift_progress_note': shiftProgressNote,
+      'use_service_duration': useServiceDuration,
     };
   }
 
@@ -86,6 +90,7 @@ class Shift {
     String? shiftStatus,
     String? shiftProgressNote,
     Patient? patient,
+    String? useServiceDuration,
   }) {
     return Shift(
       shiftId: shiftId ?? this.shiftId,
@@ -102,11 +107,13 @@ class Shift {
       shiftStatus: shiftStatus ?? this.shiftStatus,
       shiftProgressNote: shiftProgressNote ?? this.shiftProgressNote,
       patient: patient ?? this.patient,
+      useServiceDuration: useServiceDuration ?? this.useServiceDuration,
     );
   }
 
   String get statusDisplayText {
-    switch (shiftStatus) {
+    final normalized = shiftStatus?.toLowerCase().replaceAll(' ', '_');
+    switch (normalized) {
       case 'scheduled':
         return 'Scheduled';
       case 'in_progress':
@@ -116,16 +123,17 @@ class Shift {
       case 'cancelled':
         return 'Cancelled';
       default:
-        return 'Unknown';
+        return shiftStatus ?? 'Unknown';
     }
   }
 
   Color get statusColor {
-    switch (shiftStatus) {
+    final normalized = shiftStatus?.toLowerCase().replaceAll(' ', '_');
+    switch (normalized) {
       case 'scheduled':
-        return Colors.blue;
-      case 'in_progress':
         return Colors.orange;
+      case 'in_progress':
+        return Colors.blue;
       case 'completed':
         return Colors.green;
       case 'cancelled':
@@ -142,6 +150,9 @@ class Shift {
     try {
       final startParts = shiftStartTime!.split(':');
       final endParts = shiftEndTime!.split(':');
+      if (startParts.length < 2 || endParts.length < 2) {
+        return null;
+      }
 
       final startHour = int.parse(startParts[0]);
       final startMinute = int.parse(startParts[1]);
@@ -153,7 +164,7 @@ class Shift {
 
       final durationMinutes = endMinutes - startMinutes;
       return durationMinutes / 60.0;
-    } catch (e) {
+    } catch (_) {
       return null;
     }
   }

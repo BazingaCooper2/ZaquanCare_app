@@ -63,18 +63,14 @@ class _ReportsPageState extends State<ReportsPage> {
 
       for (final shiftData in shiftsResponse) {
         final shift = Shift.fromJson(shiftData);
+        final status = shift.shiftStatus?.toLowerCase().replaceAll(' ', '_');
 
-        // Count by status
-        switch (shift.shiftStatus) {
-          case 'completed':
-            completed++;
-            break;
-          case 'in_progress':
-            inProgress++;
-            break;
-          case 'cancelled':
-            cancelled++;
-            break;
+        if (status == 'completed') {
+          completed++;
+        } else if (status == 'in_progress') {
+          inProgress++;
+        } else if (status == 'cancelled') {
+          cancelled++;
         }
       }
 

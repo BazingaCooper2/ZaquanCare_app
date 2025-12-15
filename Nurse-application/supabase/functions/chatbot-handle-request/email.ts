@@ -3,19 +3,17 @@
 // 📧 email.ts — Clean Resend API version using RESEND_API_KEY
 
 export async function sendEmail(to: string, subject: string, text: string) {
-  // 🧩 Fetch Resend API key from environment
   const resendKey = Deno.env.get("RESEND_API_KEY");
 
   console.log(`📨 Attempting to send email to: ${to}`);
   console.log(`Subject: ${subject}`);
 
   if (!resendKey) {
-    console.warn("⚠️ RESEND_API_KEY not configured in environment.");
+    console.warn("⚠️ RESEND_API_KEY not configured.");
     return { ok: false, error: "Missing RESEND_API_KEY" };
   }
 
   try {
-    // 🔹 Send email via Resend API
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
@@ -23,7 +21,6 @@ export async function sendEmail(to: string, subject: string, text: string) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        // ✅ Use verified sandbox sender for Resend testing
         from: "supabase@resend.dev",
         to: [to],
         subject,
@@ -38,7 +35,7 @@ export async function sendEmail(to: string, subject: string, text: string) {
       return { ok: false, error: result.error?.message || `HTTP ${res.status}` };
     }
 
-    console.log(`✅ Email sent successfully via Resend. ID: ${result.id}`);
+    console.log(`✅ Email sent successfully. ID: ${result.id}`);
     return { ok: true, result, id: result.id };
   } catch (err) {
     console.error("❌ Email send error:", err);
@@ -46,9 +43,12 @@ export async function sendEmail(to: string, subject: string, text: string) {
   }
 }
 
-// 🔹 HTML email template
+// ------------------------------------------------------------
+// HTML Email Template
+// ------------------------------------------------------------
 function buildEmailHtml(text: string): string {
   const htmlText = text.replace(/\n/g, "<br>");
+
   return `
   <!DOCTYPE html>
   <html>
@@ -89,10 +89,16 @@ function buildEmailHtml(text: string): string {
   <body>
     <div class="container">
       <div class="header"><h2>📋 Nurse Shift / Leave Notification</h2></div>
+
       <p>You have received a new update request:</p>
+
       <div class="message-box">${htmlText}</div>
+
       <p>Please review and take appropriate action.</p>
-      <p style="font-size: 12px; color: #666;">This is an automated message from the Nurse Tracker App.</p>
+
+      <p style="font-size: 12px; color: #666;">
+        This is an automated message from the Nurse Tracker App.
+      </p>
     </div>
   </body>
   </html>

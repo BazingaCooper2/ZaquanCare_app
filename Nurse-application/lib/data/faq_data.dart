@@ -9,18 +9,29 @@ class FAQData {
       'answer': 'Open Reports → Injury → Submit new report. Your supervisor will review it.',
     },
     {
-      'question': 'Take Leave',
+      'question': 'Call in Sick',
       'answer': '',
       'action': 'leave',
     },
     {
-      'question': 'Cancel your schedule',
+      'question': 'Client booking ended early',
       'answer': '',
-      'action': 'shift_change',
+      'action': 'client_issue',
     },
     {
-      'question': 'What if I\'m running late?',
-      'answer': 'Inform your supervisor immediately through this chatbot by saying "I will be late for my shift"',
+      'question': 'Client not home',
+      'answer': '',
+      'action': 'client_issue',
+    },
+    {
+      'question': 'Client cancelled',
+      'answer': '',
+      'action': 'client_issue',
+    },
+    {
+      'question': 'Delay in arrival',
+      'answer': '',
+      'action': 'delay',
     },
     {
       'question': 'How to view my schedule?',

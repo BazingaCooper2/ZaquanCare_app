@@ -106,7 +106,7 @@ class _LoginPageState extends State<LoginPage> {
                   size: 80, color: Theme.of(context).primaryColor),
               const SizedBox(height: 24),
               Text(
-                "Gerri's Assistance",
+                "Gerri-Assistance",
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                       fontWeight: FontWeight.bold,
@@ -140,8 +140,8 @@ class _LoginPageState extends State<LoginPage> {
                   prefixIcon: const Icon(Icons.lock),
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
-                    onPressed: () =>
-                        setState(() => _isPasswordVisible = !_isPasswordVisible),
+                    onPressed: () => setState(
+                        () => _isPasswordVisible = !_isPasswordVisible),
                     icon: Icon(
                       _isPasswordVisible
                           ? Icons.visibility_off

@@ -13,137 +13,152 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// 🧠 Parse chatbot message → detect intent
-function parseMessage(message: string) {
-  const msg = message.toLowerCase();
-
-  if (
-    msg.includes("leave") ||
-    msg.includes("day off") ||
-    msg.includes("off today") ||
-    msg.includes("take leave")
-  ) {
-    return { type: "full_day_leave" };
-  }
-
-  const hasCancelKeywords =
-    msg.includes("cancel") ||
-    msg.includes("cannot") ||
-    msg.includes("can't") ||
-    msg.includes("unable") ||
-    msg.includes("cannot do");
-
-  const match = msg.match(
-    /from\s+(\d{1,2}\s*(?:am|pm)?(?::\d{2})?)\s+to\s+(\d{1,2}\s*(?:am|pm)?(?::\d{2})?)/i,
-  );
-  if (match) {
-    return { type: "partial_shift_change", start: match[1], end: match[2] };
-  }
-
-  if (hasCancelKeywords && (msg.includes("shift") || msg.includes("schedule"))) {
-    const timeMatch = msg.match(
-      /(\d{1,2}\s*(?:am|pm)?(?::\d{2})?)\s+to\s+(\d{1,2}\s*(?:am|pm)?(?::\d{2})?)/i,
-    );
-    if (timeMatch) {
-      return { type: "partial_shift_change", start: timeMatch[1], end: timeMatch[2] };
-    }
-    return { type: "partial_shift_change", start: null, end: null };
-  }
-
-  if (msg.includes("late") || msg.includes("running late") || msg.includes("be late")) {
-    return { type: "late_notification" };
-  }
-
-  return { type: "faq" };
-}
-
-// 🚀 Main Function
+// ============================================================================
+// MAIN FUNCTION HANDLER
+// ============================================================================
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   try {
-    const { emp_id, message } = await req.json();
+    const {
+      emp_id,
+      message,
+      intent_type,
+      signature_url,
+      start_time,
+      end_time,
+    } = await req.json();
 
-    if (!emp_id || !message) {
-      return new Response(JSON.stringify({ ok: false, error: "Missing emp_id or message" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+    // ------------------------------------------------------------------------
+    // Validate input
+    // ------------------------------------------------------------------------
+    if (!emp_id || !intent_type) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "Missing emp_id or intent_type",
+        }),
+        { status: 400, headers: corsHeaders },
+      );
     }
 
-    const intent = parseMessage(message);
-    console.log(`🧠 Detected intent: ${intent.type} for emp_id ${emp_id}`);
+    console.log(`🧠 Intent received: ${intent_type} from emp_id ${emp_id}`);
 
-    if (intent.type === "faq") {
-      return new Response(JSON.stringify({ ok: true, type: "faq" }), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // 🧾 Fetch employee + supervisor
+    // ------------------------------------------------------------------------
+    // Fetch employee + supervisor
+    // ------------------------------------------------------------------------
     const emp = await getEmployeeDetails(emp_id);
     if (!emp) {
-      return new Response(JSON.stringify({ ok: false, error: "Employee not found" }), {
-        status: 404,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ ok: false, error: "Employee not found" }),
+        { status: 404, headers: corsHeaders },
+      );
     }
 
-    // 🗓 Create DB record
-    const reqRecord = await createShiftChangeRequest({
-      emp_id: emp.emp_id,
-      request_type: intent.type,
-      requested_start_time: intent.start || null,
-      requested_end_time: intent.end || null,
+    // ------------------------------------------------------------------------
+    // Insert request into DB
+    // ------------------------------------------------------------------------
+    const requestRecord = await createShiftChangeRequest({
+      emp_id,
+      request_type: intent_type,
+      requested_start_time: start_time ?? null,
+      requested_end_time: end_time ?? null,
       requested_date: new Date().toISOString().slice(0, 10),
       reason: message,
+      signature_url: signature_url ?? null,
     });
 
-    // 🔄 Update shift status
-    await updateShiftStatus(emp.emp_id, intent.type);
+    // ------------------------------------------------------------------------
+    // Update shift status
+    // ------------------------------------------------------------------------
+    await updateShiftStatus(emp_id, intent_type);
 
-    // ✉️ Email content
-    const subject = `Shift / Leave Request from ${emp.full_name}`;
-    let body = "";
+    // ------------------------------------------------------------------------
+    // Build email message
+    // ------------------------------------------------------------------------
+    let emailBody = "";
 
-    switch (intent.type) {
-      case "full_day_leave":
-        body = `Employee ${emp.full_name} has requested a full-day leave.\n\nMessage: ${message}`;
+    switch (intent_type) {
+      case "call_in_sick":
+        emailBody =
+          `${emp.full_name} is calling in sick.\n\nMessage: ${message}`;
         break;
+
+      case "emergency_leave":
+        emailBody =
+          `${emp.full_name} has requested EMERGENCY LEAVE.\n\nMessage: ${message}`;
+        break;
+
       case "partial_shift_change":
-        body = intent.start && intent.end
-          ? `Employee ${emp.full_name} requests to cancel/change shift from ${intent.start} to ${intent.end}.\n\nMessage: ${message}`
-          : `Employee ${emp.full_name} requests a shift cancellation.\n\nMessage: ${message}`;
+        emailBody =
+          `${emp.full_name} requests a shift change.\nFrom: ${start_time}\nTo: ${end_time}\n\nMessage: ${message}`;
         break;
+
       case "late_notification":
-        body = `Employee ${emp.full_name} will be late for their shift.\n\nMessage: ${message}`;
+        emailBody =
+          `${emp.full_name} will be late for their shift.\n\nMessage: ${message}`;
         break;
+
+      case "client_booking_ended_early":
+        emailBody =
+          `${emp.full_name} reports: Client booking ended early.\nStart: ${start_time}\nEnd: ${end_time}\n\nMessage: ${message}`;
+        break;
+
+      case "client_not_home":
+        emailBody =
+          `${emp.full_name} reports: Client not home.\n\nMessage: ${message}`;
+        break;
+
+      case "client_cancelled":
+        emailBody =
+          `${emp.full_name} reports: Client cancelled.\n\nMessage: ${message}`;
+        break;
+
+      default:
+        emailBody =
+          `${emp.full_name} submitted a request.\n\nMessage: ${message}`;
     }
 
-    console.log(`📧 Sending email to supervisor: ${emp.supervisor_email}`);
-    const emailSent = await sendEmail(emp.supervisor_email, subject, body);
+    // ------------------------------------------------------------------------
+    // Send email
+    // ------------------------------------------------------------------------
+    console.log(`📧 Sending email → ${emp.supervisor_email}`);
+    const emailSent = await sendEmail(
+      emp.supervisor_email,
+      "Nurse Shift / Client Update",
+      emailBody,
+    );
 
-    const responsePayload = {
-      ok: true,
-      request_id: reqRecord?.id ?? null,
-      email_sent: emailSent.ok,
-      supervisor: emp.supervisor_name,
-      type: intent.type,
-    };
-
-    console.log("✅ Chatbot request processed successfully.");
-    return new Response(JSON.stringify(responsePayload), {
-      status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    // ------------------------------------------------------------------------
+    // Return final response
+    // ------------------------------------------------------------------------
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        request_id: requestRecord?.id ?? null,
+        email_sent: emailSent.ok,
+        supervisor: emp.supervisor_name,
+        type: intent_type,
+      }),
+      {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    );
   } catch (err) {
-    console.error("❌ Error in chatbot handler:", err);
-    return new Response(JSON.stringify({ ok: false, error: err.message || "Unknown error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    console.error("❌ Server Error:", err);
+
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        error: err?.message ?? "Unknown server error",
+      }),
+      {
+        status: 500,
+        headers: corsHeaders,
+      },
+    );
   }
 });

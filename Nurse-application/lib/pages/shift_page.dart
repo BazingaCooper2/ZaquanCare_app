@@ -14,12 +14,15 @@ class ShiftPage extends StatefulWidget {
 }
 
 class _ShiftPageState extends State<ShiftPage> {
-  List<Shift> _scheduled = [];
-  List<Shift> _inProgress = [];
-  List<Shift> _completed = [];
-  List<Shift> _cancelled = [];
-
+  List<Shift> _allShifts = [];
+  List<Shift> _filteredShifts = [];
   bool _isLoading = true;
+
+  // Date filter state
+  String _selectedDateFilter = 'All'; // 'Today', 'This Week', 'All'
+
+  // Status filter state
+  Set<String> _selectedStatuses = {}; // Empty means show all
 
   @override
   void initState() {
@@ -29,50 +32,50 @@ class _ShiftPageState extends State<ShiftPage> {
 
   Future<void> _loadShifts() async {
     try {
+      print('🔍 SHIFT PAGE: Loading shifts...');
       setState(() => _isLoading = true);
 
       final empId = await SessionManager.getEmpId();
-
-      // 🔍 Debug line to verify which empId is being used
-      print('🧠 Logged in empId from SessionManager: $empId');
+      print('🧠 SessionManager returned EMP_ID = $empId');
 
       if (empId == null) {
+        print('❌ ERROR: empId is NULL');
         setState(() => _isLoading = false);
         return;
       }
 
-      // ✅ Use correct column name `emp_id`
+      // Count rows in shift table
+      final countResponse =
+          await supabase.from('shift').select('count').single();
+
+      print('📊 Total rows in SHIFT table = ${countResponse['count']}');
+
+      // Fetch shifts for emp_id
+      print('📡 Running query: SELECT * FROM shift WHERE emp_id = $empId');
+
       final response = await supabase
           .from('shift')
-          .select('*')
-          // Cast empId safely if stored as string
-          .eq('emp_id', int.tryParse(empId.toString()) ?? empId)
+          .select()
+          .eq('emp_id', empId)
           .order('date')
           .order('shift_start_time');
 
-      // ✅ Convert response to model list
+      print('📥 Raw fetched rows = ${response.length}');
+      print('📥 Raw shift data = $response');
+
       final shifts =
           response.map<Shift>((json) => Shift.fromJson(json)).toList();
 
-      // ✅ Normalize shift status casing for grouping
       setState(() {
-        _scheduled = shifts
-            .where((s) => s.shiftStatus?.toLowerCase() == 'scheduled')
-            .toList();
-        _inProgress = shifts
-            .where((s) =>
-                s.shiftStatus?.toLowerCase() == 'in progress' ||
-                s.shiftStatus?.toLowerCase() == 'in_progress')
-            .toList();
-        _completed = shifts
-            .where((s) => s.shiftStatus?.toLowerCase() == 'completed')
-            .toList();
-        _cancelled = shifts
-            .where((s) => s.shiftStatus?.toLowerCase() == 'cancelled')
-            .toList();
+        _allShifts = shifts;
+        _applyFilters();
         _isLoading = false;
       });
+
+      print('✅ Parsed shifts count = ${_allShifts.length}');
     } catch (error) {
+      print('❌ ERROR loading shifts: $error');
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -82,8 +85,77 @@ class _ShiftPageState extends State<ShiftPage> {
           ),
         );
       }
+
       setState(() => _isLoading = false);
     }
+  }
+
+  void _applyFilters() {
+    List<Shift> filtered = List.from(_allShifts);
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+
+    if (_selectedDateFilter == 'Today') {
+      filtered = filtered.where((shift) {
+        if (shift.date == null) return false;
+        try {
+          final shiftDate = DateTime.parse(shift.date!);
+          final shiftDateOnly =
+              DateTime(shiftDate.year, shiftDate.month, shiftDate.day);
+          return shiftDateOnly.isAtSameMomentAs(today);
+        } catch (_) {
+          return false;
+        }
+      }).toList();
+    } else if (_selectedDateFilter == 'This Week') {
+      final daysFromMonday = now.weekday - 1;
+      final monday = today.subtract(Duration(days: daysFromMonday));
+      final sunday = monday.add(const Duration(days: 6));
+
+      filtered = filtered.where((shift) {
+        if (shift.date == null) return false;
+        try {
+          final shiftDate = DateTime.parse(shift.date!);
+          final shiftDateOnly =
+              DateTime(shiftDate.year, shiftDate.month, shiftDate.day);
+          return shiftDateOnly.compareTo(monday) >= 0 &&
+              shiftDateOnly.compareTo(sunday) <= 0;
+        } catch (_) {
+          return false;
+        }
+      }).toList();
+    }
+
+    if (_selectedStatuses.isNotEmpty) {
+      filtered = filtered.where((shift) {
+        final status = shift.shiftStatus?.toLowerCase().replaceAll(' ', '_');
+        return status != null && _selectedStatuses.contains(status);
+      }).toList();
+    }
+
+    setState(() {
+      _filteredShifts = filtered;
+    });
+  }
+
+  void _onDateFilterChanged(String filter) {
+    setState(() {
+      _selectedDateFilter = filter;
+    });
+    _applyFilters();
+  }
+
+  void _onStatusFilterToggled(String status) {
+    final normalized = status.toLowerCase().replaceAll(' ', '_');
+    setState(() {
+      if (_selectedStatuses.contains(normalized)) {
+        _selectedStatuses.remove(normalized);
+      } else {
+        _selectedStatuses.add(normalized);
+      }
+    });
+    _applyFilters();
   }
 
   Future<void> _updateShiftStatus(Shift shift, String newStatus) async {
@@ -92,16 +164,18 @@ class _ShiftPageState extends State<ShiftPage> {
           .from('shift')
           .update({'shift_status': newStatus}).eq('shift_id', shift.shiftId);
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content:
-              Text('Shift status updated to ${newStatus.replaceAll('_', ' ')}'),
-          backgroundColor: Colors.green,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+                'Shift status updated to ${newStatus.replaceAll('_', ' ')}'),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
 
-      _loadShifts();
+      await _loadShifts();
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -117,177 +191,317 @@ class _ShiftPageState extends State<ShiftPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Shifts'),
-        actions: [
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _loadShifts),
-        ],
+        title: const Text('Shift Dashboard'),
+        elevation: 0,
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+      body: RefreshIndicator(
+        onRefresh: _loadShifts,
+        child: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : Column(
                 children: [
-                  _buildSection('Scheduled', _scheduled),
-                  _buildSection('In Progress', _inProgress),
-                  _buildSection('Completed', _completed),
-                  _buildSection('Cancelled', _cancelled),
+                  // DATE FILTER
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: colorScheme.surface,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.05),
+                          blurRadius: 4,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _buildDateFilterChip('Today', theme),
+                        _buildDateFilterChip('This Week', theme),
+                        _buildDateFilterChip('All', theme),
+                      ],
+                    ),
+                  ),
+
+                  // STATUS FILTER
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: colorScheme.surfaceVariant.withOpacity(0.3),
+                    ),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          _buildStatusChip(
+                              'scheduled', 'Scheduled', Colors.orange),
+                          const SizedBox(width: 8),
+                          _buildStatusChip(
+                              'in_progress', 'In Progress', Colors.blue),
+                          const SizedBox(width: 8),
+                          _buildStatusChip(
+                              'completed', 'Completed', Colors.green),
+                          const SizedBox(width: 8),
+                          _buildStatusChip(
+                              'cancelled', 'Cancelled', Colors.red),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // SHIFT LIST
+                  Expanded(
+                    child: _filteredShifts.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.calendar_today_outlined,
+                                    size: 64,
+                                    color:
+                                        colorScheme.onSurface.withOpacity(0.3)),
+                                const SizedBox(height: 16),
+                                Text(
+                                  'No shifts found for selected filters',
+                                  style: theme.textTheme.bodyLarge?.copyWith(
+                                    color:
+                                        colorScheme.onSurface.withOpacity(0.6),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : ListView.builder(
+                            padding: const EdgeInsets.all(16),
+                            itemCount: _filteredShifts.length,
+                            itemBuilder: (context, index) {
+                              return _buildShiftCard(
+                                  _filteredShifts[index], theme);
+                            },
+                          ),
+                  ),
                 ],
               ),
-            ),
+      ),
     );
   }
 
-  Widget _buildSection(String title, List<Shift> shifts) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          title,
-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.bold,
-              ),
+  Widget _buildDateFilterChip(String label, ThemeData theme) {
+    final isSelected = _selectedDateFilter == label;
+    final colorScheme = theme.colorScheme;
+
+    return GestureDetector(
+      onTap: () => _onDateFilterChanged(label),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? colorScheme.primary
+              : colorScheme.surfaceVariant.withOpacity(0.5),
+          borderRadius: BorderRadius.circular(20),
         ),
-        const SizedBox(height: 8),
-        if (shifts.isEmpty)
-          const Text('No shifts in this category')
-        else
-          ...shifts.map((shift) => _buildCard(shift)),
-        const SizedBox(height: 24),
-      ],
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected
+                ? colorScheme.onPrimary
+                : colorScheme.onSurfaceVariant,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            fontSize: 14,
+          ),
+        ),
+      ),
     );
   }
 
-  Widget _buildCard(Shift shift) {
+  Widget _buildStatusChip(String status, String label, Color color) {
+    final normalized = status.toLowerCase().replaceAll(' ', '_');
+    final isSelected = _selectedStatuses.contains(normalized);
+
+    return FilterChip(
+      label: Text(label),
+      selected: isSelected,
+      onSelected: (_) => _onStatusFilterToggled(status),
+      selectedColor: color.withOpacity(0.2),
+      checkmarkColor: color,
+      labelStyle: TextStyle(
+        color: isSelected ? color : Colors.grey[700],
+        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+      ),
+      side: BorderSide(
+        color: isSelected ? color : Colors.grey[300]!,
+        width: isSelected ? 2 : 1,
+      ),
+    );
+  }
+
+  Widget _buildShiftCard(Shift shift, ThemeData theme) {
     final date = shift.date ?? 'No date';
     final start = shift.shiftStartTime ?? 'No start time';
     final end = shift.shiftEndTime ?? 'No end time';
-    final duration = shift.durationHours?.toStringAsFixed(2) ?? 'N/A';
-    final overtime = shift.overtimeHours?.toStringAsFixed(2) ?? 'N/A';
-    final clientName = 'Client ID: ${shift.clientId ?? 'N/A'}';
+    final statusColor = shift.statusColor;
+    final statusText = shift.statusDisplayText;
+    final normalized = shift.shiftStatus?.toLowerCase().replaceAll(' ', '_');
+    final canComplete =
+        normalized == 'scheduled' || normalized == 'in_progress';
 
     return Card(
       margin: const EdgeInsets.only(bottom: 16),
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // HEADER
             Row(
               children: [
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        clientName,
-                        style:
-                            Theme.of(context).textTheme.titleMedium?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text('$date $start - $end'),
-                      if (shift.skills != null && shift.skills!.isNotEmpty)
-                        Text('Skills: ${shift.skills}'),
-                      if (shift.tags != null && shift.tags!.isNotEmpty)
-                        Text('Tags: ${shift.tags}'),
+                      _buildStatusTag(statusText, statusColor),
+                      const SizedBox(height: 12),
+                      _buildInfoRow('🗓', date, theme),
+                      const SizedBox(height: 8),
+                      _buildInfoRow('⏰', '$start - $end', theme),
                     ],
                   ),
                 ),
-                Column(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: shift.statusColor.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: shift.statusColor),
-                      ),
-                      child: Text(
-                        shift.statusDisplayText,
-                        style: TextStyle(
-                          color: shift.statusColor,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 12,
-                        ),
-                      ),
+                if (canComplete)
+                  ElevatedButton.icon(
+                    onPressed: () => _updateShiftStatus(shift, 'completed'),
+                    icon: const Icon(Icons.check_circle, size: 18),
+                    label: const Text('Complete'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
                     ),
-                    const SizedBox(height: 8),
-                    if (shift.shiftStatus?.toLowerCase() == 'scheduled' ||
-                        shift.shiftStatus?.toLowerCase() == 'in progress' ||
-                        shift.shiftStatus?.toLowerCase() == 'in_progress')
-                      ElevatedButton(
-                        onPressed: () => _updateShiftStatus(shift, 'completed'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 4),
-                        ),
-                        child: const Text('Complete',
-                            style: TextStyle(fontSize: 12)),
-                      ),
-                  ],
-                ),
+                  ),
               ],
             ),
+
+            // Skills
+            if (shift.skills != null && shift.skills!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: _buildInfoRow('💡', 'Skills: ${shift.skills}', theme),
+              ),
+
+            // Progress Note
+            if (shift.shiftProgressNote != null &&
+                shift.shiftProgressNote!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceVariant.withOpacity(0.3),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: _buildInfoRow('📝', shift.shiftProgressNote!, theme),
+                ),
+              ),
+
             const SizedBox(height: 12),
+
+            // Duration & Overtime
             Row(
               children: [
                 Expanded(
-                  child:
-                      _buildInfoChip('Duration', '${duration}h', Colors.blue),
+                  child: _buildInfoChip(
+                    'Duration',
+                    '${shift.durationHours?.toStringAsFixed(1) ?? 'N/A'}h',
+                    Colors.blue,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child:
-                      _buildInfoChip('Overtime', '${overtime}h', Colors.orange),
+                  child: _buildInfoChip(
+                    'Overtime',
+                    '${shift.overtimeHours?.toStringAsFixed(1) ?? 'N/A'}h',
+                    Colors.orange,
+                  ),
                 ),
               ],
             ),
-            if (shift.shiftProgressNote != null &&
-                shift.shiftProgressNote!.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.grey.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  'Progress Note: ${shift.shiftProgressNote}',
-                  style: const TextStyle(fontStyle: FontStyle.italic),
-                ),
-              ),
-            ],
           ],
         ),
       ),
     );
   }
 
+  Widget _buildStatusTag(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color, width: 1.5),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: color,
+          fontWeight: FontWeight.bold,
+          fontSize: 12,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String icon, String text, ThemeData theme) {
+    return Row(
+      children: [
+        Text(icon, style: const TextStyle(fontSize: 16)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            style: theme.textTheme.bodyMedium,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildInfoChip(String label, String value, Color color) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(10),
         border: Border.all(color: color.withOpacity(0.3)),
       ),
       child: Column(
         children: [
-          Text(label,
-              style: TextStyle(
-                  color: color, fontSize: 10, fontWeight: FontWeight.bold)),
-          Text(value,
-              style: TextStyle(
-                  color: color, fontSize: 12, fontWeight: FontWeight.bold)),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(
+              color: color,
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
         ],
       ),
     );
