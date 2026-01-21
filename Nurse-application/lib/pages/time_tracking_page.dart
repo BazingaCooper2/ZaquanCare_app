@@ -229,6 +229,34 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
           if (clientResponse.isNotEmpty) {
             client = Client.fromJson(clientResponse.first);
+
+            // Auto-Geocode using Backend if coordinates are missing
+            if (client.locationCoordinates == null &&
+                client.fullAddress.isNotEmpty) {
+              final coords =
+                  await _fetchCoordinatesFromBackend(client.fullAddress);
+
+              if (coords != null) {
+                final lat = coords['latitude'];
+                final lng = coords['longitude'];
+                final locationStr = '$lat,$lng';
+
+                debugPrint(
+                    '✅ Geocoded "$locationStr" via backend. Updating DB...');
+
+                // Update DB
+                await supabase
+                    .from('client')
+                    .update({'patient_location': locationStr}).eq(
+                        'client_id', client.clientId);
+
+                // Update local object
+                var updatedMap =
+                    Map<String, dynamic>.from(clientResponse.first);
+                updatedMap['patient_location'] = locationStr;
+                client = Client.fromJson(updatedMap);
+              }
+            }
           }
         }
 
@@ -236,6 +264,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
           _nextShift = shift;
           _nextClient = client;
           _loadingNextShift = false;
+          _setupMapMarkersAndCircles(); // Refresh markers/geofences
         });
 
         debugPrint(
@@ -371,6 +400,23 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       }
     }
 
+    // Check dynamic client location (e.g. Outreach) if not found in static list
+    if (detectedPlace == null && _nextClient != null) {
+      final coords = _nextClient!.locationCoordinates;
+      if (coords != null && coords.length >= 2) {
+        final clientLat = coords[0];
+        final clientLng = coords[1];
+        final dist = _calculateDistance(
+            position.latitude, position.longitude, clientLat, clientLng);
+
+        if (dist <= _geofenceRadius) {
+          // Use service type as place name, or fallback to client name
+          detectedPlace = _nextClient!.serviceType ?? _nextClient!.fullName;
+          distToPlace = dist;
+        }
+      }
+    }
+
     // 2. Logic Control
     if (detectedPlace != null) {
       // ✅ INSIDE A GEOFENCE
@@ -395,21 +441,45 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         // Apply a small "exit buffer" to prevent jitter (e.g. GPS drift at the edge)
         // Check distance to the place we are supposedly clocked in at
         bool confirmedOutside = true;
+        double? targetLat, targetLng;
 
-        if (_currentPlaceName != null &&
-            _locations.containsKey(_currentPlaceName)) {
-          final loc = _locations[_currentPlaceName]!;
-          final dist = _calculateDistance(position.latitude, position.longitude,
-              loc.latitude, loc.longitude);
+        if (_currentPlaceName != null) {
+          // Check static locations
+          if (_locations.containsKey(_currentPlaceName)) {
+            targetLat = _locations[_currentPlaceName]!.latitude;
+            targetLng = _locations[_currentPlaceName]!.longitude;
+          }
+          // Check dynamic client location (match loosely by name or if we just assume current client)
+          else if (_nextClient != null) {
+            // If the current place name matches service type or client name
+            final sType = _nextClient!.serviceType ?? '';
+            final cName = _nextClient!.fullName;
 
-          // Buffer: Geofence Radius + 20 meters.
-          // If they are within 70m, consider them still "there" to avoid accidental clock-outs.
-          if (dist <= _geofenceRadius + 20) {
-            confirmedOutside = false;
+            if (_currentPlaceName == sType || _currentPlaceName == cName) {
+              final coords = _nextClient!.locationCoordinates;
+              if (coords != null && coords.length >= 2) {
+                targetLat = coords[0];
+                targetLng = coords[1];
+              }
+            }
           }
         }
 
-        if (confirmedOutside) {
+        if (targetLat != null && targetLng != null) {
+          final dist = _calculateDistance(
+              position.latitude, position.longitude, targetLat, targetLng);
+
+          // Buffer: Geofence Radius + 20 meters.
+          if (dist <= _geofenceRadius + 20) {
+            confirmedOutside = false;
+          }
+        } else {
+          // Should we clock out if we can't verify location?
+          // Probably yes, but safer to assume we are "lost" rather than "left".
+          // However, for strict geofencing, if we don't know where we are supposed to be, maybe we shouldn't have clocked in.
+        }
+
+        if (confirmedOutside && targetLat != null) {
           debugPrint('📍 Exited $_currentPlaceName. Auto Clocking Out...');
           _showSnackBar('📍 Exited geofence. Auto Clocking Out...');
           await _autoClockOut(position);
@@ -713,13 +783,24 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       final placeName = entry.key;
       final location = entry.value;
 
+      // Check if this location matches the client's service type
+      // Using loose comparison (ignoring case/trim)
+      final clientServiceType = _nextClient?.serviceType?.trim() ?? '';
+      final isTargetLocation =
+          clientServiceType.toLowerCase() == placeName.toLowerCase();
+
       // Add marker
       _markers.add(
         Marker(
           markerId: MarkerId(placeName),
           position: location,
-          infoWindow: InfoWindow(title: placeName),
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+          infoWindow: InfoWindow(
+              title: placeName,
+              snippet: isTargetLocation ? 'Shift Location' : null),
+          // Green if it's the target, Red otherwise
+          icon: BitmapDescriptor.defaultMarkerWithHue(isTargetLocation
+              ? BitmapDescriptor.hueGreen
+              : BitmapDescriptor.hueRed),
         ),
       );
 
@@ -729,29 +810,50 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
           circleId: CircleId(placeName),
           center: location,
           radius: _geofenceRadius,
-          strokeWidth: 2,
-          strokeColor: Colors.blue,
-          fillColor: Colors.blue.withValues(alpha: 0.1),
+          strokeWidth: isTargetLocation ? 3 : 2,
+          strokeColor: isTargetLocation ? Colors.green : Colors.blue,
+          fillColor: isTargetLocation
+              ? Colors.green.withValues(alpha: 0.15)
+              : Colors.blue.withValues(alpha: 0.1),
         ),
       );
     }
 
-    // Add patient destination marker if we have next client
+    // Add patient destination marker if we have next client AND it's not already covered by known locations
     if (_nextClient != null) {
-      final coordinates = _nextClient!.locationCoordinates;
-      if (coordinates != null && coordinates.length >= 2) {
-        _markers.add(
-          Marker(
-            markerId: const MarkerId('patient_destination'),
-            position: LatLng(coordinates[0], coordinates[1]),
-            infoWindow: InfoWindow(
-              title: _nextClient!.fullName,
-              snippet: _nextClient!.fullAddress,
+      final clientServiceType = _nextClient!.serviceType?.trim() ?? '';
+      // Check if service type is one of our known keys (case-insensitive)
+      final isKnownLocation = _locations.keys
+          .any((k) => k.toLowerCase() == clientServiceType.toLowerCase());
+
+      if (!isKnownLocation) {
+        final coordinates = _nextClient!.locationCoordinates;
+        if (coordinates != null && coordinates.length >= 2) {
+          _markers.add(
+            Marker(
+              markerId: const MarkerId('patient_destination'),
+              position: LatLng(coordinates[0], coordinates[1]),
+              infoWindow: InfoWindow(
+                title: _nextClient!.fullName,
+                snippet: _nextClient!.fullAddress,
+              ),
+              icon: BitmapDescriptor.defaultMarkerWithHue(
+                  BitmapDescriptor.hueGreen),
             ),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-                BitmapDescriptor.hueGreen),
-          ),
-        );
+          );
+
+          // Add visual Geofence Circle for dynamic client location
+          _circles.add(
+            Circle(
+              circleId: const CircleId('patient_geofence'),
+              center: LatLng(coordinates[0], coordinates[1]),
+              radius: _geofenceRadius,
+              strokeWidth: 2,
+              strokeColor: Colors.green,
+              fillColor: Colors.green.withValues(alpha: 0.1),
+            ),
+          );
+        }
       }
     }
   }
@@ -1006,6 +1108,53 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     );
   }
 
+  Future<void> _moveCameraToClient() async {
+    if (_nextClient != null && _mapController != null) {
+      final coordinates = _nextClient!.locationCoordinates;
+      if (coordinates != null && coordinates.length >= 2) {
+        await _mapController!.animateCamera(
+          CameraUpdate.newLatLngZoom(
+            LatLng(coordinates[0], coordinates[1]),
+            18, // High zoom for precision
+          ),
+        );
+      }
+    }
+  }
+
+  Future<Map<String, double>?> _fetchCoordinatesFromBackend(
+      String address) async {
+    try {
+      // Use 192.168.0.7 for Real Device (Your Local IP)
+      // Use 10.0.2.2 ONLY for Android Emulator
+      final uri = Uri.parse('http://192.168.0.7:3000/api/geocode');
+
+      debugPrint('🌍 Calling Geocode API: $uri for "$address"');
+
+      final response = await http
+          .post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'address': address}),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return {
+          'latitude': (data['latitude'] as num).toDouble(),
+          'longitude': (data['longitude'] as num).toDouble(),
+        };
+      } else {
+        debugPrint(
+            '⚠️ Geocode API Error: ${response.statusCode} ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('❌ Network Error (Geocoding): $e');
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1070,12 +1219,32 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
           // 2. Map Overlay Controls (Recenter FAB)
           Positioned(
             right: 16,
-            bottom: 300, // Above the bottom sheet
-            child: FloatingActionButton(
-              heroTag: 'recenter_fab',
-              onPressed: _moveCameraToUser,
-              backgroundColor: Colors.white,
-              child: const Icon(Icons.my_location, color: Colors.black87),
+            top: 130, // Moved to top-right to avoid obstruction
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_nextClient != null &&
+                    _nextClient!.locationCoordinates != null &&
+                    _nextClient!.locationCoordinates!.length >= 2) ...[
+                  FloatingActionButton(
+                    heroTag: 'client_loc_fab',
+                    onPressed: _moveCameraToClient,
+                    backgroundColor: Colors.white,
+                    mini: true,
+                    tooltip: 'Show Client Location',
+                    child: const Icon(Icons.person_pin_circle,
+                        color: Colors.green),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                FloatingActionButton(
+                  heroTag: 'recenter_fab',
+                  onPressed: _moveCameraToUser,
+                  backgroundColor: Colors.white,
+                  tooltip: 'My Location',
+                  child: const Icon(Icons.my_location, color: Colors.black87),
+                ),
+              ],
             ),
           ),
 
@@ -1254,7 +1423,22 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
                                             fontSize: 15,
                                           ),
                                         ),
-                                        const SizedBox(height: 2),
+                                        if (_nextClient!.serviceType != null &&
+                                            _nextClient!
+                                                .serviceType!.isNotEmpty)
+                                          Padding(
+                                            padding:
+                                                const EdgeInsets.only(top: 2),
+                                            child: Text(
+                                              _nextClient!.serviceType!,
+                                              style: TextStyle(
+                                                color: Colors.blue.shade700,
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                        const SizedBox(height: 4),
                                         Text(
                                           '${_nextShift!.date} • ${_nextShift!.formattedTimeRange}',
                                           style: TextStyle(

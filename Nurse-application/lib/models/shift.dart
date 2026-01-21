@@ -19,6 +19,7 @@ class Shift {
   final String? useServiceDuration;
   final String? clientName;
   final String? clientLocation;
+  final String? clientServiceType;
 
   Shift({
     required this.shiftId,
@@ -38,6 +39,7 @@ class Shift {
     this.useServiceDuration,
     this.clientName,
     this.clientLocation,
+    this.clientServiceType,
   });
 
   factory Shift.fromJson(Map<String, dynamic> json) {
@@ -48,6 +50,8 @@ class Shift {
     final clientName = json['client']?['name'] ?? json['client_name'];
     final clientLocation =
         json['client']?['patient_location'] ?? json['client_location'];
+    final clientServiceType =
+        json['client']?['service_type'] ?? json['client_service_type'];
 
     debugPrint('🔍 Parsed clientName: $clientName');
     debugPrint('🔍 Parsed clientLocation: $clientLocation');
@@ -70,6 +74,7 @@ class Shift {
       useServiceDuration: json['use_service_duration'],
       clientName: clientName,
       clientLocation: clientLocation,
+      clientServiceType: clientServiceType,
     );
   }
 

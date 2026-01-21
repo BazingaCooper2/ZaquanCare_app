@@ -81,7 +81,7 @@ class _ShiftPageState extends State<ShiftPage> {
           final clientsResponse = await supabase
               .from('client')
               .select(
-                  'client_id, name, patient_location, address_line1, city, province')
+                  'client_id, name, patient_location, address_line1, city, province, service_type')
               .inFilter('client_id', clientIds);
 
           debugPrint('👥 Fetched ${clientsResponse.length} clients');
@@ -107,6 +107,7 @@ class _ShiftPageState extends State<ShiftPage> {
         // Add client data to JSON
         if (clientData != null) {
           json['client_name'] = clientData['name'];
+          json['client_service_type'] = clientData['service_type'];
 
           // Build location string from available data
           final locationParts = <String>[];
@@ -477,8 +478,13 @@ class _ShiftPageState extends State<ShiftPage> {
                         // Client Location
                         if (shift.clientLocation != null &&
                             shift.clientLocation!.isNotEmpty) ...[
-                          const SizedBox(height: 8),
                           _buildInfoRow('📍', shift.clientLocation!, theme),
+                        ],
+                        // Service Type (from Client)
+                        if (shift.clientServiceType != null &&
+                            shift.clientServiceType!.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          _buildInfoRow('💼', shift.clientServiceType!, theme),
                         ],
                       ],
                     ),
