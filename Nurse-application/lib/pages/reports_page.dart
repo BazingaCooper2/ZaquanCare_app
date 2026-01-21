@@ -163,113 +163,207 @@ class _ReportsPageState extends State<ReportsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
     return Scaffold(
-      appBar: AppBar(title: const Text("Report")),
+      appBar: AppBar(
+        title: const Text('Performance Reports'),
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      _SummaryCard(
-                        title: "Total Hours Worked",
-                        value: "${_totalHours.toStringAsFixed(2)} h",
-                        color: Colors.blue,
-                      ),
-                      _SummaryCard(
-                        title: "Overtime Hours Today",
-                        value: "${_overtimeHours.toStringAsFixed(2)} h",
-                        color: Colors.orange,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      _SummaryCard(
-                        title: "Monthly Hours",
-                        value: "${_monthlyHours.toStringAsFixed(2)} h",
-                        color: Colors.purple,
-                      ),
-                      _SummaryCard(
-                        title: "Completed Shifts",
-                        value: "$_completed",
-                        color: Colors.green,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      _SummaryCard(
-                        title: "In Progress",
-                        value: "$_inProgress",
-                        color: Colors.amber,
-                      ),
-                      _SummaryCard(
-                        title: "Cancelled",
-                        value: "$_cancelled",
-                        color: Colors.red,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  const SizedBox.shrink(),
-                  const SizedBox(height: 24),
-                  const Text(
-                    'Shift Status Distribution',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    height: 200,
-                    child: PieChart(
-                      PieChartData(
-                        sections: _getPieSections(),
-                        sectionsSpace: 2,
-                        centerSpaceRadius: 40,
-                      ),
+                  // KEY METRICS SECTION
+                  Text(
+                    'Key Metrics',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey.shade600,
                     ),
                   ),
-                  const SizedBox(height: 24),
-                  const Text(
-                    'Daily Hours (Last 7 Days)',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      _SummaryCard(
+                        title: "Total Hours",
+                        value: "${_totalHours.toStringAsFixed(1)}h",
+                        color: theme.colorScheme.primary,
+                        icon: Icons.timer,
+                      ),
+                      const SizedBox(width: 12),
+                      _SummaryCard(
+                        title: "Overtime",
+                        value: "${_overtimeHours.toStringAsFixed(1)}h",
+                        color: Colors.orange,
+                        icon: Icons.access_time_filled,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      _SummaryCard(
+                        title: "This Month",
+                        value: "${_monthlyHours.toStringAsFixed(1)}h",
+                        color: Colors.purple,
+                        icon: Icons.calendar_month,
+                      ),
+                      const SizedBox(width: 12),
+                      _SummaryCard(
+                        title: "Completed",
+                        value: "$_completed",
+                        color: Colors.green,
+                        icon: Icons.task_alt,
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 32),
+
+                  // WEEKLY ACTIVITY SECTION
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Weekly Activity',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                      Row(
+                        children: [
+                          Container(
+                              width: 12,
+                              height: 12,
+                              decoration: BoxDecoration(
+                                  color: theme.colorScheme.primary,
+                                  shape: BoxShape.circle)),
+                          const SizedBox(width: 6),
+                          Text('Hours Worked',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade600,
+                                  fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 16),
-                  SizedBox(
-                    height: 200,
-                    child: BarChart(
-                      BarChartData(
-                        barGroups: _getBarGroups(),
-                        borderData: FlBorderData(show: false),
-                        titlesData: FlTitlesData(
-                          bottomTitles: AxisTitles(
-                            sideTitles: SideTitles(
-                              showTitles: true,
-                              getTitlesWidget: (value, meta) {
-                                if (value.toInt() < _days.length) {
-                                  return Text(_days[value.toInt()],
-                                      style: const TextStyle(fontSize: 12));
-                                }
-                                return const Text('');
-                              },
+                  Card(
+                    elevation: 3,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20)),
+                    child: Container(
+                      height: 250,
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(20),
+                        gradient: LinearGradient(
+                          colors: [
+                            Colors.white,
+                            Colors.blue.shade50.withValues(alpha: 0.5),
+                          ],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                      ),
+                      child: BarChart(
+                        BarChartData(
+                          barGroups: _getBarGroups(),
+                          gridData: const FlGridData(show: false),
+                          borderData: FlBorderData(show: false),
+                          titlesData: FlTitlesData(
+                            bottomTitles: AxisTitles(
+                              sideTitles: SideTitles(
+                                showTitles: true,
+                                getTitlesWidget: (value, meta) {
+                                  if (value.toInt() < _days.length) {
+                                    return Padding(
+                                      padding: const EdgeInsets.only(top: 8),
+                                      child: Text(
+                                        _days[value.toInt()],
+                                        style: TextStyle(
+                                          color: Colors.grey.shade600,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                  return const Text('');
+                                },
+                              ),
                             ),
+                            leftTitles: const AxisTitles(
+                              sideTitles: SideTitles(showTitles: false),
+                            ),
+                            topTitles: const AxisTitles(
+                                sideTitles: SideTitles(showTitles: false)),
+                            rightTitles: const AxisTitles(
+                                sideTitles: SideTitles(showTitles: false)),
                           ),
-                          leftTitles: const AxisTitles(
-                            sideTitles: SideTitles(showTitles: true),
-                          ),
-                          topTitles: const AxisTitles(
-                              sideTitles: SideTitles(showTitles: false)),
-                          rightTitles: const AxisTitles(
-                              sideTitles: SideTitles(showTitles: false)),
                         ),
                       ),
                     ),
                   ),
+
+                  const SizedBox(height: 32),
+
+                  // SHIFT STATUS SECTION
+                  Text(
+                    'Shift Distribution',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey.shade600,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Card(
+                    elevation: 3,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20)),
+                    child: Container(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        children: [
+                          SizedBox(
+                            height: 250,
+                            child: PieChart(
+                              PieChartData(
+                                sections: _getPieSections(),
+                                sectionsSpace: 4,
+                                centerSpaceRadius: 50,
+                                centerSpaceColor: Colors.white,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          // PIE CHART LEGEND
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              _LegendItem(
+                                  color: Colors.green.shade400,
+                                  label: 'Completed'),
+                              _LegendItem(
+                                  color: Colors.amber.shade400,
+                                  label: 'In Progress'),
+                              _LegendItem(
+                                  color: Colors.red.shade400,
+                                  label: 'Cancelled'),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 30),
                 ],
               ),
             ),
@@ -282,21 +376,27 @@ class _ReportsPageState extends State<ReportsPage> {
     return [
       PieChartSectionData(
         value: _completed.toDouble(),
-        title: 'Completed\n$_completed',
-        color: Colors.green,
-        radius: 50,
+        title: '$_completed',
+        color: Colors.green.shade400,
+        radius: 60,
+        titleStyle:
+            const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
       ),
       PieChartSectionData(
         value: _inProgress.toDouble(),
-        title: 'In Progress\n$_inProgress',
-        color: Colors.amber,
-        radius: 50,
+        title: '$_inProgress',
+        color: Colors.amber.shade400,
+        radius: 55,
+        titleStyle:
+            const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
       ),
       PieChartSectionData(
         value: _cancelled.toDouble(),
-        title: 'Cancelled\n$_cancelled',
-        color: Colors.red,
+        title: '$_cancelled',
+        color: Colors.red.shade400,
         radius: 50,
+        titleStyle:
+            const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
       ),
     ];
   }
@@ -308,7 +408,14 @@ class _ReportsPageState extends State<ReportsPage> {
         barRods: [
           BarChartRodData(
             toY: _dailyHours[index],
-            color: Colors.blue,
+            color: Theme.of(context).colorScheme.primary,
+            width: 16,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
+            backDrawRodData: BackgroundBarChartRodData(
+              show: true,
+              toY: 12, // Max hours expected
+              color: Colors.grey.shade100,
+            ),
           ),
         ],
       );
@@ -316,33 +423,87 @@ class _ReportsPageState extends State<ReportsPage> {
   }
 }
 
+class _LegendItem extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _LegendItem({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 12,
+          height: 12,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: const TextStyle(
+              fontWeight: FontWeight.bold, fontSize: 12, color: Colors.black54),
+        ),
+      ],
+    );
+  }
+}
+
 class _SummaryCard extends StatelessWidget {
   final String title;
   final String value;
   final Color color;
+  final IconData icon;
 
   const _SummaryCard({
     required this.title,
     required this.value,
     required this.color,
+    required this.icon,
   });
 
   @override
   Widget build(BuildContext context) {
     return Expanded(
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              Text(title,
-                  style: const TextStyle(fontSize: 14, color: Colors.grey)),
-              const SizedBox(height: 8),
-              Text(value,
-                  style: TextStyle(
-                      fontSize: 20, fontWeight: FontWeight.bold, color: color)),
-            ],
-          ),
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.grey.shade100,
+              blurRadius: 10,
+              offset: const Offset(0, 5),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: color, size: 20),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              value,
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Colors.blueGrey.shade900,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              title,
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
+            ),
+          ],
         ),
       ),
     );

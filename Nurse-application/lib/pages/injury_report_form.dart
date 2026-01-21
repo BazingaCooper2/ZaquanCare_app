@@ -56,6 +56,7 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
       firstDate: DateTime(2000),
       lastDate: DateTime(2101),
     );
+    if (!mounted) return;
     if (picked != null && picked != _selectedDate) {
       setState(() => _selectedDate = picked);
     }
@@ -72,10 +73,10 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
 
       final publicUrl =
           supabase.storage.from('injury_signatures').getPublicUrl(fileName);
-      print('✅ Signature uploaded: $publicUrl');
+      debugPrint('✅ Signature uploaded: $publicUrl');
       return publicUrl;
     } catch (e) {
-      print('❌ Error uploading signature: $e');
+      debugPrint('❌ Error uploading signature: $e');
       return null;
     }
   }
@@ -106,8 +107,10 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
     try {
       final empId = await SessionManager.getEmpId();
       if (empId == null) {
-        context.showSnackBar('You must be logged in to submit a report.',
-            isError: true);
+        if (mounted) {
+          context.showSnackBar('You must be logged in to submit a report.',
+              isError: true);
+        }
         setState(() => _isSubmitting = false);
         return;
       }
@@ -115,7 +118,9 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
       // ✅ Upload signature to Supabase Storage
       final uploadedUrl = await _uploadSignatureToSupabase(_signatureImage!);
       if (uploadedUrl == null) {
-        context.showSnackBar('Failed to upload signature!', isError: true);
+        if (mounted) {
+          context.showSnackBar('Failed to upload signature!', isError: true);
+        }
         setState(() => _isSubmitting = false);
         return;
       }
@@ -149,16 +154,20 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
         signatureImage: _signatureImage, // ✅ Attach signature image in email
       );
 
-      if (emailSent) {
-        context.showSnackBar(
-            '✅ Injury report submitted & email sent to supervisor');
-      } else {
-        context.showSnackBar('⚠️ Report saved but failed to send email');
+      if (mounted) {
+        if (emailSent) {
+          context.showSnackBar(
+              '✅ Injury report submitted & email sent to supervisor');
+        } else {
+          context.showSnackBar('⚠️ Report saved but failed to send email');
+        }
       }
 
       _resetForm();
     } catch (e) {
-      context.showSnackBar('❌ Failed to submit report: $e', isError: true);
+      if (mounted) {
+        context.showSnackBar('❌ Failed to submit report: $e', isError: true);
+      }
     } finally {
       setState(() => _isSubmitting = false);
     }
@@ -265,7 +274,8 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
                       const SizedBox(height: 20),
                       const Text(
                         'Employee Signature',
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                        style: TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16),
                       ),
                       const SizedBox(height: 10),
                       Container(
@@ -292,12 +302,19 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
                                   icon: const Icon(Icons.save_alt),
                                   label: const Text('Save'),
                                   onPressed: () async {
-                                    final signature = await _signatureController.toPngBytes();
+                                    final signature =
+                                        await _signatureController.toPngBytes();
                                     if (signature != null) {
-                                      setState(() => _signatureImage = signature);
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        const SnackBar(content: Text('Signature saved!')),
-                                      );
+                                      setState(
+                                          () => _signatureImage = signature);
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          const SnackBar(
+                                              content:
+                                                  Text('Signature saved!')),
+                                        );
+                                      }
                                     }
                                   },
                                 ),
@@ -400,6 +417,7 @@ class _InjuryReportFormState extends State<InjuryReportForm> {
     required Function(String?) onChanged,
   }) {
     return DropdownButtonFormField<String>(
+      // ignore: deprecated_member_use
       value: value,
       decoration: InputDecoration(
         labelText: label,

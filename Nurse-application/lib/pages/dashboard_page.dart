@@ -11,8 +11,10 @@ import 'shift_page.dart';
 import 'time_tracking_page.dart';
 import 'login_page.dart';
 import 'reports_page.dart'; // ✅ Added import
-import 'injury_report_form.dart'; // ✅ Added import for Injury Report Form
+import 'unified_reports_form.dart'; // ✅ Import unified reports form
 import '../widgets/chatbot_button.dart';
+import '../services/shift_offer_helper.dart';
+import 'shift_offers_page.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -52,6 +54,9 @@ class _DashboardPageState extends State<DashboardPage> {
           _employee = Employee.fromJson(response);
           _isLoading = false;
         });
+
+        // Initialize Realtime Shift Offer System
+        initializeShiftOfferSystem();
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -84,6 +89,9 @@ class _DashboardPageState extends State<DashboardPage> {
 
   Future<void> _signOut() async {
     try {
+      // Dispose shift offer system first
+      disposeShiftOfferSystem();
+
       await SessionManager.clearSession();
       if (mounted) {
         Navigator.of(context).pushReplacement(
@@ -129,8 +137,6 @@ class _DashboardPageState extends State<DashboardPage> {
     }
 
     final themeProvider = Provider.of<ThemeProvider>(context);
-    final screenWidth = MediaQuery.of(context).size.width;
-    final crossAxisCount = screenWidth > 600 ? 3 : 2;
 
     return Scaffold(
       appBar: AppBar(
@@ -138,7 +144,8 @@ class _DashboardPageState extends State<DashboardPage> {
         elevation: 2,
         actions: [
           IconButton(
-            icon: Icon(themeProvider.isDarkMode ? Icons.light_mode : Icons.dark_mode),
+            icon: Icon(
+                themeProvider.isDarkMode ? Icons.light_mode : Icons.dark_mode),
             onPressed: () => themeProvider.toggleTheme(),
             tooltip: 'Toggle Theme',
           ),
@@ -158,95 +165,154 @@ class _DashboardPageState extends State<DashboardPage> {
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                   colors: [
-                    Theme.of(context).colorScheme.primary.withOpacity(0.05),
+                    Theme.of(context)
+                        .colorScheme
+                        .primary
+                        .withValues(alpha: 0.05),
                     Theme.of(context).colorScheme.surface,
                   ],
                 ),
               ),
               child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: AnimationLimiter(
-                child: GridView.count(
-                  crossAxisCount: crossAxisCount,
-                  crossAxisSpacing: 16,
-                  mainAxisSpacing: 16,
-                  children: AnimationConfiguration.toStaggeredList(
-                    duration: const Duration(milliseconds: 375),
-                    childAnimationBuilder: (widget) => SlideAnimation(
-                      horizontalOffset: 50.0,
-                      child: FadeInAnimation(
-                        child: widget,
+                padding: const EdgeInsets.all(16.0),
+                child: AnimationLimiter(
+                  child: AnimationLimiter(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: AnimationConfiguration.toStaggeredList(
+                          duration: const Duration(milliseconds: 375),
+                          childAnimationBuilder: (widget) => SlideAnimation(
+                            verticalOffset: 50.0,
+                            child: FadeInAnimation(
+                              child: widget,
+                            ),
+                          ),
+                          children: [
+                            // SECTION 1: PRIMARY (Schedule)
+                            _DashboardCard(
+                              title: 'My Schedule',
+                              subtitle: 'View upcoming shifts',
+                              icon: Icons.calendar_month_rounded,
+                              color: Colors.blue.shade700,
+                              isFeatured: true, // New property for big cards
+                              onTap: () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (context) =>
+                                        ShiftPage(employee: _employee!),
+                                  ),
+                                );
+                              },
+                            ),
+                            const SizedBox(height: 16),
+
+                            // SECTION 2: TRACKING & ANALYTICS
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _DashboardCard(
+                                    title: 'Clock in/out',
+                                    icon: Icons.timer_outlined,
+                                    color: Colors.orange.shade700,
+                                    onTap: () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute(
+                                          builder: (context) =>
+                                              TimeTrackingPage(
+                                                  employee: _employee!),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(width: 16),
+                                Expanded(
+                                  child: _DashboardCard(
+                                    title: 'Reports',
+                                    icon: Icons.bar_chart_rounded,
+                                    color: Colors.purple.shade700,
+                                    onTap: () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute(
+                                          builder: (context) =>
+                                              ReportsPage(employee: _employee!),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 16),
+
+                            // SECTION 3: MANAGEMENT & INFO
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _DashboardCard(
+                                    title: 'New Report',
+                                    icon: Icons.add_task_rounded,
+                                    color: Colors.teal.shade700,
+                                    onTap: () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute(
+                                          builder: (context) =>
+                                              const UnifiedReportsForm(),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(width: 16),
+                                Expanded(
+                                  child: _DashboardCard(
+                                    title: 'Profile',
+                                    icon: Icons.person_outline_rounded,
+                                    color: Colors.indigo.shade700,
+                                    onTap: () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute(
+                                          builder: (context) =>
+                                              EmployeeInfoPage(
+                                                  employee: _employee!),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 16),
+
+                            // SECTION 4: SHIFT OFFERS
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _DashboardCard(
+                                    title: 'Shift Offers',
+                                    icon: Icons.local_offer_rounded,
+                                    color: Colors.deepPurple.shade700,
+                                    onTap: () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute(
+                                          builder: (context) => ShiftOffersPage(
+                                              employee: _employee!),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 100), // Space for FAB
+                          ],
+                        ),
                       ),
                     ),
-                    children: [
-                      _DashboardCard(
-                        title: 'Employee Info',
-                        icon: Icons.person,
-                        color: Colors.blue,
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (context) =>
-                                  EmployeeInfoPage(employee: _employee!),
-                            ),
-                          );
-                        },
-                      ),
-                      _DashboardCard(
-                        title: 'Shifts',
-                        icon: Icons.calendar_today,
-                        color: Colors.green,
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (context) => ShiftPage(employee: _employee!),
-                            ),
-                          );
-                        },
-                      ),
-                      _DashboardCard(
-                        title: 'Time Tracking',
-                        icon: Icons.access_time,
-                        color: Colors.orange,
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (context) =>
-                                  TimeTrackingPage(employee: _employee!),
-                            ),
-                          );
-                        },
-                      ),
-                      _DashboardCard(
-                        title: 'Reports',
-                        icon: Icons.analytics,
-                        color: Colors.purple,
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (context) => ReportsPage(
-                                  employee: _employee!), // ✅ Navigate to reports
-                            ),
-                          );
-                        },
-                      ),
-                      _DashboardCard(
-                        title: 'Injury Report',
-                        icon: Icons.report,
-                        color: Colors.red,
-                        onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (context) => const InjuryReportForm(),
-                            ),
-                          );
-                        },
-                      ),
-                    ],
                   ),
                 ),
               ),
-            ),
             ),
           ),
           Positioned(
@@ -264,9 +330,12 @@ class _DashboardPageState extends State<DashboardPage> {
                   try {
                     await launchUrl(launchUri);
                   } catch (e) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Could not launch phone dialer')),
-                    );
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                            content: Text('Could not launch phone dialer')),
+                      );
+                    }
                   }
                 },
                 child: const Text(
@@ -289,58 +358,156 @@ class _DashboardPageState extends State<DashboardPage> {
 
 class _DashboardCard extends StatelessWidget {
   final String title;
+  final String? subtitle;
   final IconData icon;
   final Color color;
   final VoidCallback onTap;
+  final bool isFeatured;
 
   const _DashboardCard({
     required this.title,
+    this.subtitle,
     required this.icon,
     required this.color,
     required this.onTap,
+    this.isFeatured = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      elevation: 4,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                color.withOpacity(0.1),
-                color.withOpacity(0.05),
-              ],
+    return SizedBox(
+      height: isFeatured ? 180 : 160,
+      child: Card(
+        elevation: 4,
+        shadowColor: color.withValues(alpha: 0.3),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(20),
+          child: Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(20),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  color.withValues(alpha: 0.15),
+                  color.withValues(alpha: 0.05),
+                ],
+              ),
             ),
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                icon,
-                size: 48,
-                color: color,
-              ),
-              const SizedBox(height: 12),
-              Text(
-                title,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                      color: color,
-                    ),
-                textAlign: TextAlign.center,
-              ),
-            ],
+            child: isFeatured
+                ? _buildFeaturedLayout(context)
+                : _buildStandardLayout(context),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildFeaturedLayout(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                title,
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black87,
+                    ),
+              ),
+              if (subtitle != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  subtitle!,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Colors.grey[700],
+                      ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(30),
+                  boxShadow: [
+                    BoxShadow(
+                      color: color.withValues(alpha: 0.4),
+                      blurRadius: 8,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: const Text('View Now',
+                    style: TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.bold)),
+              )
+            ],
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.6),
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: color.withValues(alpha: 0.2),
+                blurRadius: 12,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: Icon(
+            icon,
+            size: 48,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStandardLayout(BuildContext context) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.6),
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: color.withValues(alpha: 0.2),
+                blurRadius: 8,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Icon(
+            icon,
+            size: 32,
+            color: color,
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          title,
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+          textAlign: TextAlign.center,
+        ),
+      ],
     );
   }
 }

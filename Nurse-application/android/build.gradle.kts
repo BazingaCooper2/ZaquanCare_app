@@ -15,6 +15,15 @@ allprojects {
         google()
         mavenCentral()
     }
+    configurations.all {
+        resolutionStrategy {
+            force("androidx.browser:browser:1.8.0")
+            force("androidx.activity:activity-ktx:1.9.1")
+            force("androidx.activity:activity:1.9.1")
+            force("androidx.core:core-ktx:1.13.1")
+            force("androidx.core:core:1.13.1")
+        }
+    }
 }
 
 // Custom build directory setup (optional)
@@ -28,7 +37,7 @@ subprojects {
 
     tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
         kotlinOptions {
-            jvmTarget = "11"
+            jvmTarget = "17"
         }
     }
 }

@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:nurse_tracking_app/main.dart';
+import 'package:flutter_staggered_animations/flutter_staggered_animations.dart';
+import 'package:nurse_tracking_app/main.dart'; // For Global keys/Supabase if needed
 import 'package:nurse_tracking_app/pages/dashboard_page.dart';
 import 'package:nurse_tracking_app/services/session.dart';
+import 'package:nurse_tracking_app/services/shift_offer_helper.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -31,7 +33,7 @@ class _LoginPageState extends State<LoginPage> {
         return;
       }
 
-      print('🔍 Attempting Supabase login for: $email');
+      debugPrint('🔍 Attempting Supabase login for: $email');
 
       // ✅ Step 1: Authenticate user using Supabase Auth
       final response = await supabase.auth.signInWithPassword(
@@ -41,15 +43,16 @@ class _LoginPageState extends State<LoginPage> {
 
       final user = response.user;
       if (user == null) {
-        context.showSnackBar('Invalid credentials', isError: true);
+        if (mounted) {
+          context.showSnackBar('Invalid credentials', isError: true);
+        }
         setState(() => _isLoading = false);
         return;
       }
 
-      print('✅ Logged in as ${user.email}, UID: ${user.id}');
+      debugPrint('✅ Logged in as ${user.email}, UID: ${user.id}');
 
       // ✅ Step 2: Fetch corresponding employee record
-      // (Make sure your employee table either has auth_id or matching email)
       final employee = await supabase
           .from('employee')
           .select(
@@ -58,9 +61,11 @@ class _LoginPageState extends State<LoginPage> {
           .maybeSingle();
 
       if (employee == null) {
-        context.showSnackBar(
-            'Employee profile not found in database. Contact admin.',
-            isError: true);
+        if (mounted) {
+          context.showSnackBar(
+              'Employee profile not found in database. Contact admin.',
+              isError: true);
+        }
         await supabase.auth.signOut();
         setState(() => _isLoading = false);
         return;
@@ -69,7 +74,15 @@ class _LoginPageState extends State<LoginPage> {
       // ✅ Step 3: Save employee session locally
       await SessionManager.saveSession(employee);
 
-      // ✅ Step 4: Navigate to dashboard
+      // ✅ Step 4: Initialize shift offer system
+      try {
+        await initializeShiftOfferSystem();
+      } catch (e) {
+        debugPrint('⚠️ Non-critical: Shift offer init failed: $e');
+        // Don't block login if shift offers fail
+      }
+
+      // ✅ Step 5: Navigate to dashboard
       if (mounted) {
         context.showSnackBar('✅ Login successful');
         Navigator.of(context).pushReplacement(
@@ -77,9 +90,11 @@ class _LoginPageState extends State<LoginPage> {
         );
       }
     } catch (error, stack) {
-      print('❌ Login error: $error');
-      print(stack);
-      context.showSnackBar('Login failed: $error', isError: true);
+      debugPrint('❌ Login error: $error');
+      debugPrint(stack.toString());
+      if (mounted) {
+        context.showSnackBar('Login failed: $error', isError: true);
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -94,74 +109,169 @@ class _LoginPageState extends State<LoginPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    // Modern gradient background
+    final backgroundGradient = LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: isDark
+          ? [
+              const Color(0xFF0F2027),
+              const Color(0xFF203A43),
+              const Color(0xFF2C5364)
+            ]
+          : [const Color(0xFFE0F7FA), const Color(0xFF80DEEA)],
+    );
+
     return Scaffold(
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Icon(Icons.local_hospital,
-                  size: 80, color: Theme.of(context).primaryColor),
-              const SizedBox(height: 24),
-              Text(
-                "Gerri-Assistance",
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                      color: Theme.of(context).primaryColor,
-                    ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Hospital Home Care Management',
-                textAlign: TextAlign.center,
-                style: Theme.of(context)
-                    .textTheme
-                    .bodyMedium
-                    ?.copyWith(color: Colors.grey[600]),
-              ),
-              const SizedBox(height: 48),
-              TextFormField(
-                controller: _emailController,
-                decoration: const InputDecoration(
-                  labelText: 'Email',
-                  prefixIcon: Icon(Icons.email),
-                  border: OutlineInputBorder(),
-                ),
-                keyboardType: TextInputType.emailAddress,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _passwordController,
-                decoration: InputDecoration(
-                  labelText: 'Password',
-                  prefixIcon: const Icon(Icons.lock),
-                  border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    onPressed: () => setState(
-                        () => _isPasswordVisible = !_isPasswordVisible),
-                    icon: Icon(
-                      _isPasswordVisible
-                          ? Icons.visibility_off
-                          : Icons.visibility,
+      body: Container(
+        decoration: BoxDecoration(gradient: backgroundGradient),
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            child: AnimationLimiter(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: AnimationConfiguration.toStaggeredList(
+                  duration: const Duration(milliseconds: 600),
+                  childAnimationBuilder: (widget) => SlideAnimation(
+                    verticalOffset: 50.0,
+                    child: FadeInAnimation(
+                      child: widget,
                     ),
                   ),
+                  children: [
+                    // Brand Logo/Icon with shadow
+                    Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: theme.cardTheme.color,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.1),
+                            blurRadius: 20,
+                            offset: const Offset(0, 10),
+                          ),
+                        ],
+                      ),
+                      child: Icon(
+                        Icons.medical_services_rounded,
+                        size: 64,
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+                    const SizedBox(height: 32),
+
+                    // Main Card
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 400),
+                      child: Card(
+                        elevation: 8,
+                        shadowColor: Colors.black26,
+                        child: Padding(
+                          padding: const EdgeInsets.all(32.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Text(
+                                "Welcome Back",
+                                textAlign: TextAlign.center,
+                                style: theme.textTheme.headlineSmall?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                  color: theme.colorScheme.onSurface,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                "Gerri-Assistance Portal",
+                                textAlign: TextAlign.center,
+                                style: theme.textTheme.bodyLarge?.copyWith(
+                                  color: theme.colorScheme.onSurface
+                                      .withValues(alpha: 0.6),
+                                ),
+                              ),
+                              const SizedBox(height: 32),
+
+                              // Email Input
+                              TextFormField(
+                                controller: _emailController,
+                                keyboardType: TextInputType.emailAddress,
+                                textInputAction: TextInputAction.next,
+                                decoration: const InputDecoration(
+                                  labelText: 'Email Address',
+                                  prefixIcon: Icon(Icons.email_outlined),
+                                  hintText: 'nurse@hospital.com',
+                                ),
+                              ),
+                              const SizedBox(height: 20),
+
+                              // Password Input
+                              TextFormField(
+                                controller: _passwordController,
+                                obscureText: !_isPasswordVisible,
+                                textInputAction: TextInputAction.done,
+                                onFieldSubmitted: (_) => _signIn(),
+                                decoration: InputDecoration(
+                                  labelText: 'Password',
+                                  prefixIcon: const Icon(Icons.lock_outline),
+                                  suffixIcon: IconButton(
+                                    onPressed: () => setState(() =>
+                                        _isPasswordVisible =
+                                            !_isPasswordVisible),
+                                    icon: Icon(
+                                      _isPasswordVisible
+                                          ? Icons.visibility_outlined
+                                          : Icons.visibility_off_outlined,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 32),
+
+                              // Sign In Button
+                              SizedBox(
+                                height: 50,
+                                child: ElevatedButton(
+                                  onPressed: _isLoading ? null : _signIn,
+                                  style: ElevatedButton.styleFrom(
+                                    shadowColor: theme.colorScheme.primary
+                                        .withValues(alpha: 0.4),
+                                    elevation: 6,
+                                  ),
+                                  child: _isLoading
+                                      ? const SizedBox(
+                                          height: 24,
+                                          width: 24,
+                                          child: CircularProgressIndicator(
+                                            color: Colors.white,
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Text(
+                                          'Sign In',
+                                          style: TextStyle(fontSize: 18),
+                                        ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    Text(
+                      'Hospital Home Care Management v1.0',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: isDark ? Colors.white54 : Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
                 ),
-                obscureText: !_isPasswordVisible,
               ),
-              const SizedBox(height: 24),
-              ElevatedButton(
-                onPressed: _isLoading ? null : _signIn,
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                ),
-                child: _isLoading
-                    ? const CircularProgressIndicator(color: Colors.white)
-                    : const Text('Sign In'),
-              ),
-            ],
+            ),
           ),
         ),
       ),

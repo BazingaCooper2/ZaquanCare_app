@@ -1,5 +1,5 @@
 name: nurse_tracking_app
-description: Hospital nurse tracking application with GPS and scheduling
+description: ZaqenCare - Hospital nurse tracking application with GPS and scheduling
 
 publish_to: 'none'
 
@@ -15,6 +15,7 @@ dependencies:
   # Backend
   supabase_flutter: ^2.0.0
   http: ^1.1.0
+  web_socket_channel: ^2.4.0
 
   # Location & Maps
   geolocator: ^10.1.0
@@ -22,7 +23,7 @@ dependencies:
   flutter_map: ^6.1.0
   latlong2: ^0.9.1
   flutter_polyline_points: ^2.0.0
-  google_maps_flutter: ^2.5.3
+  google_maps_flutter: ^2.10.0
   permission_handler: ^11.3.0
 
   # UI & Utils

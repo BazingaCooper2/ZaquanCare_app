@@ -145,7 +145,8 @@ class _EmployeeInfoPageState extends State<EmployeeInfoPage> {
         Center(
           child: CircleAvatar(
             radius: 60,
-            backgroundColor: Theme.of(context).primaryColor.withOpacity(0.1),
+            backgroundColor:
+                Theme.of(context).primaryColor.withValues(alpha: 0.1),
             child: Text(
               '${_employee.firstName[0]}${_employee.lastName[0]}',
               style: TextStyle(

@@ -3,6 +3,7 @@ import '../main.dart';
 import '../models/employee.dart';
 import '../models/shift.dart';
 import 'package:nurse_tracking_app/services/session.dart';
+import '../widgets/tasks_dialog.dart';
 
 class ShiftPage extends StatefulWidget {
   final Employee employee;
@@ -22,7 +23,7 @@ class _ShiftPageState extends State<ShiftPage> {
   String _selectedDateFilter = 'All'; // 'Today', 'This Week', 'All'
 
   // Status filter state
-  Set<String> _selectedStatuses = {}; // Empty means show all
+  final Set<String> _selectedStatuses = {}; // Empty means show all
 
   @override
   void initState() {
@@ -32,14 +33,14 @@ class _ShiftPageState extends State<ShiftPage> {
 
   Future<void> _loadShifts() async {
     try {
-      print('🔍 SHIFT PAGE: Loading shifts...');
+      debugPrint('🔍 SHIFT PAGE: Loading shifts...');
       setState(() => _isLoading = true);
 
       final empId = await SessionManager.getEmpId();
-      print('🧠 SessionManager returned EMP_ID = $empId');
+      debugPrint('🧠 SessionManager returned EMP_ID = $empId');
 
       if (empId == null) {
-        print('❌ ERROR: empId is NULL');
+        debugPrint('❌ ERROR: empId is NULL');
         setState(() => _isLoading = false);
         return;
       }
@@ -48,10 +49,10 @@ class _ShiftPageState extends State<ShiftPage> {
       final countResponse =
           await supabase.from('shift').select('count').single();
 
-      print('📊 Total rows in SHIFT table = ${countResponse['count']}');
+      debugPrint('📊 Total rows in SHIFT table = ${countResponse['count']}');
 
       // Fetch shifts for emp_id
-      print('📡 Running query: SELECT * FROM shift WHERE emp_id = $empId');
+      debugPrint('📡 Running query: SELECT * FROM shift WHERE emp_id = $empId');
 
       final response = await supabase
           .from('shift')
@@ -60,8 +61,8 @@ class _ShiftPageState extends State<ShiftPage> {
           .order('date')
           .order('shift_start_time');
 
-      print('📥 Raw fetched rows = ${response.length}');
-      print('📥 Raw shift data = $response');
+      debugPrint('📥 Raw fetched rows = ${response.length}');
+      debugPrint('📥 Raw shift data = $response');
 
       final shifts =
           response.map<Shift>((json) => Shift.fromJson(json)).toList();
@@ -72,9 +73,9 @@ class _ShiftPageState extends State<ShiftPage> {
         _isLoading = false;
       });
 
-      print('✅ Parsed shifts count = ${_allShifts.length}');
+      debugPrint('✅ Parsed shifts count = ${_allShifts.length}');
     } catch (error) {
-      print('❌ ERROR loading shifts: $error');
+      debugPrint('❌ ERROR loading shifts: $error');
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -158,37 +159,6 @@ class _ShiftPageState extends State<ShiftPage> {
     _applyFilters();
   }
 
-  Future<void> _updateShiftStatus(Shift shift, String newStatus) async {
-    try {
-      await supabase
-          .from('shift')
-          .update({'shift_status': newStatus}).eq('shift_id', shift.shiftId);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-                'Shift status updated to ${newStatus.replaceAll('_', ' ')}'),
-            backgroundColor: Colors.green,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-
-      await _loadShifts();
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error updating shift status: $error'),
-            backgroundColor: Theme.of(context).colorScheme.error,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -213,7 +183,7 @@ class _ShiftPageState extends State<ShiftPage> {
                       color: colorScheme.surface,
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.05),
+                          color: Colors.black.withValues(alpha: 0.05),
                           blurRadius: 4,
                           offset: const Offset(0, 2),
                         ),
@@ -234,7 +204,8 @@ class _ShiftPageState extends State<ShiftPage> {
                     padding: const EdgeInsets.symmetric(
                         horizontal: 16, vertical: 12),
                     decoration: BoxDecoration(
-                      color: colorScheme.surfaceVariant.withOpacity(0.3),
+                      color: colorScheme.surfaceContainerHighest
+                          .withValues(alpha: 0.3),
                     ),
                     child: SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
@@ -265,14 +236,14 @@ class _ShiftPageState extends State<ShiftPage> {
                               children: [
                                 Icon(Icons.calendar_today_outlined,
                                     size: 64,
-                                    color:
-                                        colorScheme.onSurface.withOpacity(0.3)),
+                                    color: colorScheme.onSurface
+                                        .withValues(alpha: 0.3)),
                                 const SizedBox(height: 16),
                                 Text(
                                   'No shifts found for selected filters',
                                   style: theme.textTheme.bodyLarge?.copyWith(
-                                    color:
-                                        colorScheme.onSurface.withOpacity(0.6),
+                                    color: colorScheme.onSurface
+                                        .withValues(alpha: 0.6),
                                   ),
                                 ),
                               ],
@@ -304,7 +275,7 @@ class _ShiftPageState extends State<ShiftPage> {
         decoration: BoxDecoration(
           color: isSelected
               ? colorScheme.primary
-              : colorScheme.surfaceVariant.withOpacity(0.5),
+              : colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
@@ -329,7 +300,7 @@ class _ShiftPageState extends State<ShiftPage> {
       label: Text(label),
       selected: isSelected,
       onSelected: (_) => _onStatusFilterToggled(status),
-      selectedColor: color.withOpacity(0.2),
+      selectedColor: color.withValues(alpha: 0.2),
       checkmarkColor: color,
       labelStyle: TextStyle(
         color: isSelected ? color : Colors.grey[700],
@@ -358,84 +329,104 @@ class _ShiftPageState extends State<ShiftPage> {
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // HEADER
-            Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildStatusTag(statusText, statusColor),
-                      const SizedBox(height: 12),
-                      _buildInfoRow('🗓', date, theme),
-                      const SizedBox(height: 8),
-                      _buildInfoRow('⏰', '$start - $end', theme),
-                    ],
-                  ),
-                ),
-                if (canComplete)
-                  ElevatedButton.icon(
-                    onPressed: () => _updateShiftStatus(shift, 'completed'),
-                    icon: const Icon(Icons.check_circle, size: 18),
-                    label: const Text('Complete'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      foregroundColor: Colors.white,
+      child: InkWell(
+        onTap: () {
+          showDialog(
+            context: context,
+            builder: (context) => TasksDialog(shift: shift),
+          );
+        },
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // HEADER
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildStatusTag(statusText, statusColor),
+                        const SizedBox(height: 12),
+                        _buildInfoRow('🗓', date, theme),
+                        const SizedBox(height: 8),
+                        _buildInfoRow('⏰', '$start - $end', theme),
+                      ],
                     ),
                   ),
-              ],
-            ),
-
-            // Skills
-            if (shift.skills != null && shift.skills!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: _buildInfoRow('💡', 'Skills: ${shift.skills}', theme),
+                  if (canComplete)
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        showDialog(
+                          context: context,
+                          builder: (context) => TasksDialog(shift: shift),
+                        );
+                      },
+                      icon: const Icon(Icons.list_alt_rounded, size: 18),
+                      label: const Text('View Tasks'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue.shade50,
+                        foregroundColor: Colors.blue.shade700,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          side: BorderSide(color: Colors.blue.shade200),
+                        ),
+                      ),
+                    ),
+                ],
               ),
 
-            // Progress Note
-            if (shift.shiftProgressNote != null &&
-                shift.shiftProgressNote!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceVariant.withOpacity(0.3),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: _buildInfoRow('📝', shift.shiftProgressNote!, theme),
+              // Skills
+              if (shift.skills != null && shift.skills!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: _buildInfoRow('💡', 'Skills: ${shift.skills}', theme),
                 ),
+
+              // Progress Note
+              if (shift.shiftProgressNote != null &&
+                  shift.shiftProgressNote!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest
+                          .withValues(alpha: 0.3),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: _buildInfoRow('📝', shift.shiftProgressNote!, theme),
+                  ),
+                ),
+
+              const SizedBox(height: 12),
+
+              // Duration & Overtime
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildInfoChip(
+                      'Duration',
+                      '${shift.durationHours?.toStringAsFixed(1) ?? 'N/A'}h',
+                      Colors.blue,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildInfoChip(
+                      'Overtime',
+                      '${shift.overtimeHours?.toStringAsFixed(1) ?? 'N/A'}h',
+                      Colors.orange,
+                    ),
+                  ),
+                ],
               ),
-
-            const SizedBox(height: 12),
-
-            // Duration & Overtime
-            Row(
-              children: [
-                Expanded(
-                  child: _buildInfoChip(
-                    'Duration',
-                    '${shift.durationHours?.toStringAsFixed(1) ?? 'N/A'}h',
-                    Colors.blue,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _buildInfoChip(
-                    'Overtime',
-                    '${shift.overtimeHours?.toStringAsFixed(1) ?? 'N/A'}h',
-                    Colors.orange,
-                  ),
-                ),
-              ],
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -445,7 +436,7 @@ class _ShiftPageState extends State<ShiftPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
+        color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: color, width: 1.5),
       ),
@@ -479,9 +470,9 @@ class _ShiftPageState extends State<ShiftPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
+        color: color.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withOpacity(0.3)),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
       ),
       child: Column(
         children: [

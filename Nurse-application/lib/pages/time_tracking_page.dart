@@ -11,6 +11,7 @@ import '../main.dart';
 import '../models/employee.dart';
 import '../models/shift.dart';
 import '../models/client.dart';
+import '../models/task_model.dart';
 import 'package:nurse_tracking_app/services/session.dart';
 
 class TimeTrackingPage extends StatefulWidget {
@@ -48,11 +49,16 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   Client? _nextClient;
   bool _loadingNextShift = false;
 
+  // Task state
+  List<Task> _tasks = [];
+  bool _loadingTasks = false;
+
   // Assisted-Living locations with 50m geofence
   static const Map<String, LatLng> _locations = {
     'Willow Place': LatLng(43.538165, -80.311467),
     '85 Neeve': LatLng(43.536884, -80.307129),
     '87 Neeve': LatLng(43.536732, -80.307545),
+    'Test Zone (50m North)': LatLng(12.939200, 80.131500),
   };
 
   static const double _geofenceRadius = 50.0; // meters
@@ -62,9 +68,61 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   @override
   void initState() {
     super.initState();
+    _checkActiveClockInStatus(); // Check for existing session first
     _requestLocationPermission();
     _setupMapMarkersAndCircles();
     _loadNextUpcomingShift();
+  }
+
+  Future<void> _checkActiveClockInStatus() async {
+    try {
+      final empId = await SessionManager.getEmpId();
+      if (empId == null) return;
+
+      // Check DB for any row where clock_out_time is NULL
+      final response = await supabase
+          .from('time_logs')
+          .select('*')
+          .eq('emp_id', empId)
+          .filter('clock_out_time', 'is', null)
+          .maybeSingle();
+
+      if (response != null && mounted) {
+        final log = response;
+        final lat = (log['clock_in_latitude'] as num).toDouble();
+        final lng = (log['clock_in_longitude'] as num).toDouble();
+
+        // Try to match which location we are at based on stored coordinates
+        String? matchedPlace;
+        for (final entry in _locations.entries) {
+          final loc = entry.value;
+          final dist =
+              _calculateDistance(lat, lng, loc.latitude, loc.longitude);
+
+          // If the stored clock-in location corresponds to one of our geofences
+          // (allowing a relaxed buffer since we might have clocked in at the edge)
+          if (dist <= _geofenceRadius + 50) {
+            matchedPlace = entry.key;
+            break;
+          }
+        }
+
+        setState(() {
+          _isClockedIn = true;
+          _currentPlaceName = matchedPlace;
+          _currentLogId = log['id'].toString();
+          _clockInTimeUtc = DateTime.parse(log['clock_in_time']);
+        });
+
+        if (matchedPlace != null) {
+          print('🔄 Restored active session at $matchedPlace');
+        } else {
+          debugPrint('⚠️ Restored active session but location unknown.');
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking active session: $e');
+    }
   }
 
   @override
@@ -136,13 +194,16 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         if (_currentPosition != null && client != null) {
           _updateRouteToClient();
         }
+
+        // Load tasks for this shift
+        _loadTasks();
       } else {
         setState(() {
           _loadingNextShift = false;
         });
       }
     } catch (e) {
-      print('Error loading next shift: $e');
+      debugPrint('Error loading next shift: $e');
       setState(() {
         _loadingNextShift = false;
       });
@@ -151,23 +212,23 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
   Future<void> _requestLocationPermission() async {
     LocationPermission permission = await Geolocator.checkPermission();
-    print('🔐 Current location permission: $permission');
+    debugPrint('🔐 Current location permission: $permission');
 
     // If permission is denied, request it
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
-      print('🔐 Requested permission result: $permission');
+      debugPrint('🔐 Requested permission result: $permission');
     }
 
     // Check if still denied or denied forever
     if (permission == LocationPermission.denied) {
-      print('❌ Location permission denied');
+      debugPrint('❌ Location permission denied');
       _showSnackBar('Location permission denied', isError: true);
       return;
     }
 
     if (permission == LocationPermission.deniedForever) {
-      print('❌ Location permission denied forever');
+      debugPrint('❌ Location permission denied forever');
       _showSnackBar(
           'Location permission denied forever. Please enable in settings.',
           isError: true);
@@ -175,7 +236,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     }
 
     // Permission is granted (whileInUse or always)
-    print('✅ Location permission granted: $permission');
+    debugPrint('✅ Location permission granted: $permission');
     _startLocationPolling();
   }
 
@@ -195,7 +256,8 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         desiredAccuracy: LocationAccuracy.high,
       );
 
-      print('📍 Location updated: ${position.latitude}, ${position.longitude}');
+      debugPrint(
+          '📍 Location updated: ${position.latitude}, ${position.longitude}');
 
       setState(() {
         _currentPosition = position;
@@ -214,7 +276,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
           ),
         );
         _hasCenteredOnUser = true;
-        print('🎯 Centered map on user location');
+        debugPrint('🎯 Centered map on user location');
       }
 
       // Check for geofence entry at assisted living locations
@@ -224,30 +286,33 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       _updateMapMarkers();
       _updateRouteToClient();
     } catch (e) {
-      print('❌ Location error: $e');
+      debugPrint('❌ Location error: $e');
       _showSnackBar('Location error: $e', isError: true);
     }
   }
 
   Future<void> _checkGeofenceEntry(Position position) async {
-    if (_isClockedIn) return; // Already clocked in
+    // 1. Handle Auto Clock-IN
+    if (!_isClockedIn) {
+      for (final entry in _locations.entries) {
+        final placeName = entry.key;
+        final location = entry.value;
 
-    for (final entry in _locations.entries) {
-      final placeName = entry.key;
-      final location = entry.value;
+        final distance = _calculateDistance(
+          position.latitude,
+          position.longitude,
+          location.latitude,
+          location.longitude,
+        );
 
-      final distance = _calculateDistance(
-        position.latitude,
-        position.longitude,
-        location.latitude,
-        location.longitude,
-      );
-
-      if (distance <= _geofenceRadius) {
-        await _autoClockIn(placeName, position);
-        break; // Only clock in to the first location found
+        if (distance <= _geofenceRadius) {
+          await _autoClockIn(placeName, position);
+          break; // Stop after finding the first valid location
+        }
       }
     }
+    // 2. Handle Auto Clock-OUT - REMOVED per user request
+    // Now controlled by Task Completion
   }
 
   Future<void> _updateRouteToClient() async {
@@ -306,7 +371,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         }
       }
     } catch (e) {
-      print('Error updating route: $e');
+      debugPrint('Error updating route: $e');
     }
   }
 
@@ -362,13 +427,23 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     );
   }
 
+  bool _permissionDenied = false;
+
   Future<void> _autoClockIn(String placeName, Position position) async {
+    if (_permissionDenied) return; // Stop trying if we know we are blocked
+
+    // 1. Check if Supabase Auth is valid
+    if (supabase.auth.currentUser == null) {
+      _showSnackBar('⚠️ Logged out from server. Please Log Out & Log In again.',
+          isError: true);
+      return;
+    }
+
     try {
       final nowUtc = DateTime.now().toUtc();
       final clockInAddress =
           await _reverseGeocode(position.latitude, position.longitude);
 
-      // Round coordinates to 8 decimal places
       final lat = double.parse(position.latitude.toStringAsFixed(8));
       final lng = double.parse(position.longitude.toStringAsFixed(8));
 
@@ -378,9 +453,12 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         return;
       }
 
+      debugPrint(
+          '📝 Attempting Auto-Clock In: AuthID=${supabase.auth.currentUser?.id}, EmpID=$empId');
+
       final response = await supabase.from('time_logs').insert({
         'emp_id': empId,
-        'schedule_id': _nextShift?.shiftId.toString(),
+        // 'schedule_id': _nextShift?.shiftId.toString(), // schema mismatch
         'clock_in_time': nowUtc.toIso8601String(),
         'clock_in_latitude': lat,
         'clock_in_longitude': lng,
@@ -397,37 +475,65 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         });
 
         final localTime = DateFormat('HH:mm:ss').format(DateTime.now());
-        _showSnackBar('Clocked in at $placeName ($localTime)');
+        _showSnackBar('✅ Auto Clocked IN at $placeName ($localTime)');
       }
     } catch (e) {
-      _showSnackBar('Error clocking in: $e', isError: true);
+      // Handle RLS Permission Error specifically
+      if (e.toString().contains('42501') || e.toString().contains('policy')) {
+        setState(() {
+          _permissionDenied = true;
+        });
+        _showPermissionErrorDialog();
+      }
+      // Handle Network Error
+      else if (e.toString().contains('SocketException') ||
+          e.toString().contains('host lookup')) {
+        _showSnackBar(
+            '⚠️ Internet lost. Validating entry locally... (Sync pending)',
+            isError: true);
+      } else {
+        _showSnackBar('Error clocking in: $e', isError: true);
+        debugPrint('❌ Clock-in Error: $e');
+      }
     }
   }
 
-  Future<void> _manualClockOut() async {
-    if (!_isClockedIn || _currentLogId == null || _currentPosition == null) {
-      return;
-    }
+  void _showPermissionErrorDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('⚠️ Permission Denied'),
+        content: const Text(
+            'The Supabase Database blocked this request (RLS Policy).\n\n'
+            'FASTEST FIX:\n'
+            '1. Go to Supabase Dashboard > Table Editor > "time_logs"\n'
+            '2. Click "RLS" or "Active" in the toolbar\n'
+            '3. Click "Disable RLS"\n\n'
+            'Then restart the app.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _autoClockOut(Position position) async {
+    if (_currentLogId == null || _permissionDenied) return;
 
     try {
       final nowUtc = DateTime.now().toUtc();
-      final clockOutAddress = await _reverseGeocode(
-          _currentPosition!.latitude, _currentPosition!.longitude);
+      final clockOutAddress =
+          await _reverseGeocode(position.latitude, position.longitude);
 
-      // Calculate total hours
       final totalHours = _clockInTimeUtc != null
           ? ((nowUtc.difference(_clockInTimeUtc!).inMinutes) / 60.0)
           : 0.0;
 
-      // Round coordinates to 8 decimal places
-      final lat = double.parse(_currentPosition!.latitude.toStringAsFixed(8));
-      final lng = double.parse(_currentPosition!.longitude.toStringAsFixed(8));
-
-      final empId = await SessionManager.getEmpId();
-      if (empId == null) {
-        _showSnackBar('Session expired. Please login again.', isError: true);
-        return;
-      }
+      final lat = double.parse(position.latitude.toStringAsFixed(8));
+      final lng = double.parse(position.longitude.toStringAsFixed(8));
 
       final update = supabase.from('time_logs').update({
         'clock_out_time': nowUtc.toIso8601String(),
@@ -436,21 +542,13 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         'clock_out_address': clockOutAddress,
         'total_hours': double.parse(totalHours.toStringAsFixed(2)),
         'updated_at': nowUtc.toIso8601String(),
-      });
+      }).eq('id', _currentLogId!);
 
-      if (widget.scheduleId != null) {
-        await update.eq('emp_id', empId).eq('schedule_id', widget.scheduleId!);
-      } else if (_currentLogId != null) {
-        await update.eq('id', _currentLogId!);
-      } else {
-        _showSnackBar('Unable to find the current log to update.',
-            isError: true);
-        return;
-      }
+      await update;
 
-      final placeName = _currentPlaceName ?? 'Unknown';
+      final placeName = _currentPlaceName ?? 'Location';
       _showSnackBar(
-          'Clocked out. Worked ${totalHours.toStringAsFixed(2)} h at $placeName');
+          '👋 Left $placeName. Auto Clocked OUT. (${totalHours.toStringAsFixed(2)} hrs)');
 
       setState(() {
         _isClockedIn = false;
@@ -459,8 +557,26 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         _clockInTimeUtc = null;
       });
     } catch (e) {
-      _showSnackBar('Error clocking out: $e', isError: true);
+      if (e.toString().contains('42501') || e.toString().contains('policy')) {
+        _showSnackBar('⚠️ Database Permission Error (Check RLS Policies)',
+            isError: true);
+      } else if (e.toString().contains('SocketException') ||
+          e.toString().contains('host lookup')) {
+        _showSnackBar(
+            '⚠️ Internet lost during clock-out. Please check connection.',
+            isError: true);
+      } else {
+        _showSnackBar('Error clocking out: $e', isError: true);
+      }
     }
+  }
+
+  Future<void> _manualClockOut() async {
+    if (!_isClockedIn || _currentLogId == null || _currentPosition == null) {
+      return;
+    }
+    // Re-use auto clock out logic but from current param
+    await _autoClockOut(_currentPosition!);
   }
 
   void _setupMapMarkersAndCircles() {
@@ -541,6 +657,123 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
           16,
         ),
       );
+    }
+  }
+
+  Future<void> _loadTasks() async {
+    if (_nextShift == null) {
+      debugPrint('❌ _loadTasks: _nextShift is null');
+      return;
+    }
+
+    debugPrint(
+        '🔍 _loadTasks: Fetching tasks for shift_id: ${_nextShift!.shiftId}');
+
+    setState(() {
+      _loadingTasks = true;
+    });
+
+    try {
+      // 1. Try fetching by shift_id (Standard Foreign Key)
+      var response = await supabase
+          .from('tasks')
+          .select('*')
+          .eq('shift_id', _nextShift!.shiftId)
+          .order('task_id');
+
+      debugPrint(
+          '📥 _loadTasks: Found ${response.length} tasks by shift_id=${_nextShift!.shiftId}');
+
+      // 2. Fallback: If no tasks found by shift_id, try linking via shift.task_id (Business ID)
+      if (response.isEmpty && _nextShift!.taskId != null) {
+        debugPrint(
+            '⚠️ No tasks by shift_id. Attempting fallback via shift.task_id (task_code): ${_nextShift!.taskId}');
+
+        final shiftTaskCode = _nextShift!.taskId!;
+
+        final fallbackResponse = await supabase
+            .from('tasks')
+            .select('*')
+            .eq('task_code', shiftTaskCode);
+
+        if (fallbackResponse.isNotEmpty) {
+          debugPrint(
+              '✅ Found ${fallbackResponse.length} tasks via task_code=$shiftTaskCode');
+          response = fallbackResponse;
+        }
+      }
+
+      final tasks = response.map<Task>((e) => Task.fromJson(e)).toList();
+
+      if (mounted) {
+        setState(() {
+          _tasks = tasks;
+          _loadingTasks = false;
+        });
+
+        // If still empty, it might be RLS or data not inserted
+        if (tasks.isEmpty) {
+          debugPrint(
+              '⚠️ _tasks is empty. Possible reasons: 1. No data in "tasks" table. 2. shift_id mismatch. 3. RLS policy hiding rows.');
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ Error loading tasks: $e');
+      if (mounted) {
+        setState(() {
+          _loadingTasks = false;
+        });
+        if (e.toString().contains('42501') || e.toString().contains('policy')) {
+          _showSnackBar('Database Permission Error. Check RLS policies.',
+              isError: true);
+        }
+      }
+    }
+  }
+
+  Future<void> _toggleTask(Task task, bool value) async {
+    final index = _tasks.indexWhere((t) => t.taskId == task.taskId);
+    if (index == -1) return;
+
+    final updatedTask = Task(
+        taskId: task.taskId,
+        shiftId: task.shiftId,
+        details: task.details,
+        status: value,
+        comment: task.comment,
+        taskCode: task.taskCode);
+
+    setState(() {
+      _tasks[index] = updatedTask;
+    });
+
+    try {
+      await supabase
+          .from('tasks')
+          .update({'status': value}).eq('task_id', task.taskId);
+
+      // Check for auto clock-out
+      if (value && _isClockedIn) {
+        final allDone = _tasks.every((t) => t.status);
+        if (allDone) {
+          // Trigger auto clock out with a small delay
+          if (mounted && _currentPosition != null) {
+            Future.delayed(const Duration(milliseconds: 1000), () {
+              if (mounted) {
+                _autoClockOut(_currentPosition!);
+              }
+            });
+          }
+        }
+      }
+    } catch (e) {
+      // Revert on error
+      if (mounted) {
+        setState(() {
+          _tasks[index] = task;
+        });
+        _showSnackBar('Error updating task: $e', isError: true);
+      }
     }
   }
 
@@ -634,185 +867,446 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        title: const Text('Time Tracking'),
+        title: const Text('Clock in/out',
+            style: TextStyle(
+                color: Colors.black87,
+                fontWeight: FontWeight.w600,
+                fontSize: 18)),
+        backgroundColor: Colors.white.withValues(alpha: 0.9),
+        elevation: 0,
+        centerTitle: true,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new,
+              color: Colors.black87, size: 20),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(Icons.refresh, color: Colors.blueAccent),
             onPressed: _loadNextUpcomingShift,
-            tooltip: 'Refresh',
-          ),
-          IconButton(
-            icon: const Icon(Icons.my_location),
-            onPressed: _moveCameraToUser,
-            tooltip: 'Re-center',
+            tooltip: 'Refresh Shift',
           ),
         ],
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(bottom: Radius.circular(20)),
+        ),
       ),
-      body: Column(
+      body: Stack(
         children: [
-          // Status bar with next shift info
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(16),
-            color: _isClockedIn ? Colors.green.shade100 : Colors.grey.shade100,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      _isClockedIn ? Icons.check_circle : Icons.schedule,
-                      color: _isClockedIn ? Colors.green : Colors.grey,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _isClockedIn
-                            ? 'Clocked in at $_currentPlaceName'
-                            : 'Not clocked in',
-                        style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.bold),
-                      ),
+          // 1. Full Screen Map
+          GoogleMap(
+            initialCameraPosition: CameraPosition(
+              target: _getInitialCameraPosition(),
+              zoom: 15,
+            ),
+            markers: _markers,
+            circles: _circles,
+            polylines: _polylines,
+            onMapCreated: (controller) async {
+              _mapController = controller;
+              // Center on user location if already available
+              if (_currentPosition != null && !_hasCenteredOnUser) {
+                await controller.animateCamera(
+                  CameraUpdate.newLatLngZoom(
+                    LatLng(_currentPosition!.latitude,
+                        _currentPosition!.longitude),
+                    16,
+                  ),
+                );
+                _hasCenteredOnUser = true;
+              }
+            },
+            myLocationEnabled: _currentPosition != null,
+            myLocationButtonEnabled: false,
+            zoomControlsEnabled: false,
+            // Add padding to map to avoid bottom sheet covering google logo/controls
+            padding: const EdgeInsets.only(bottom: 280),
+          ),
+
+          // 2. Map Overlay Controls (Recenter FAB)
+          Positioned(
+            right: 16,
+            bottom: 300, // Above the bottom sheet
+            child: FloatingActionButton(
+              heroTag: 'recenter_fab',
+              onPressed: _moveCameraToUser,
+              backgroundColor: Colors.white,
+              child: const Icon(Icons.my_location, color: Colors.black87),
+            ),
+          ),
+
+          // 3. Loading Overlay for GPS
+          if (_currentPosition == null)
+            Positioned(
+              top: 120,
+              left: 20,
+              right: 20,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.black87.withValues(alpha: 0.8),
+                  borderRadius: BorderRadius.circular(30),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.2),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
                     ),
                   ],
                 ),
-                if (_nextShift != null && _nextClient != null) ...[
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.blue.shade50,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.blue.shade200),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            const Icon(Icons.location_on,
-                                size: 16, color: Colors.blue),
-                            const SizedBox(width: 4),
-                            Expanded(
-                              child: Text(
-                                'Next Patient: ${_nextClient!.fullName}',
-                                style: const TextStyle(
+                    SizedBox(width: 12),
+                    Text(
+                      'Acquiring precise location...',
+                      style: TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // 4. Bottom Control Panel
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(30)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.15),
+                    blurRadius: 20,
+                    offset: const Offset(0, -5),
+                  ),
+                ],
+              ),
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.all(24.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Handle bar for visual affordance
+                      Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          margin: const EdgeInsets.only(bottom: 20),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade300,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+
+                      // Status Header
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: _isClockedIn
+                                  ? Colors.green.withValues(alpha: 0.1)
+                                  : Colors.orange.withValues(alpha: 0.1),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              _isClockedIn
+                                  ? Icons.check_circle_rounded
+                                  : Icons.timer_outlined,
+                              color:
+                                  _isClockedIn ? Colors.green : Colors.orange,
+                              size: 24,
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  _isClockedIn
+                                      ? 'Currently Working'
+                                      : 'Ready to Start',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: Colors.grey.shade600,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  _isClockedIn ? 'Clocked In' : 'Clocked Out',
+                                  style: const TextStyle(
+                                    fontSize: 20,
                                     fontWeight: FontWeight.bold,
-                                    color: Colors.blue),
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (_isClockedIn && _clockInTimeUtc != null)
+                            _LiveTimer(startTime: _clockInTimeUtc!),
+                        ],
+                      ),
+
+                      const SizedBox(height: 24),
+
+                      // Next Shift Info Card
+                      if (_loadingNextShift)
+                        const Padding(
+                          padding: EdgeInsets.all(20.0),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      else if (_nextShift != null && _nextClient != null)
+                        Column(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                color: Colors.blue.withValues(alpha: 0.05),
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                    color: Colors.blue.withValues(alpha: 0.1)),
+                              ),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white,
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: const Icon(
+                                        Icons.person_outline_rounded,
+                                        color: Colors.blue),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          _nextClient!.fullName,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 15,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          '${_nextShift!.date} • ${_nextShift!.shiftStartTime}',
+                                          style: TextStyle(
+                                            color: Colors.grey.shade600,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
+                            if (_isClockedIn) ...[
+                              const SizedBox(height: 20),
+                              const Align(
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  'Shift Tasks',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              if (_loadingTasks)
+                                const Center(
+                                    child: Padding(
+                                  padding: EdgeInsets.all(16),
+                                  child: CircularProgressIndicator(),
+                                ))
+                              else if (_tasks.isEmpty)
+                                Container(
+                                  padding: const EdgeInsets.all(16),
+                                  width: double.infinity,
+                                  decoration: BoxDecoration(
+                                    color: Colors.grey.shade50,
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    'No tasks assigned for this shift.',
+                                    style:
+                                        TextStyle(color: Colors.grey.shade600),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                )
+                              else
+                                ListView.builder(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  itemCount: _tasks.length,
+                                  itemBuilder: (context, index) {
+                                    final task = _tasks[index];
+                                    return CheckboxListTile(
+                                      value: task.status,
+                                      onChanged: (val) =>
+                                          _toggleTask(task, val ?? false),
+                                      title: Text(
+                                        task.details ?? 'Task ${index + 1}',
+                                        style: TextStyle(
+                                          decoration: task.status
+                                              ? TextDecoration.lineThrough
+                                              : null,
+                                          color: task.status
+                                              ? Colors.grey
+                                              : Colors.black87,
+                                        ),
+                                      ),
+                                      controlAffinity:
+                                          ListTileControlAffinity.leading,
+                                      contentPadding: EdgeInsets.zero,
+                                      activeColor: Colors.blue,
+                                    );
+                                  },
+                                ),
+                            ],
                           ],
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          _nextClient!.fullAddress,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                        if (_nextShift!.date != null &&
-                            _nextShift!.shiftStartTime != null)
-                          Text(
-                            '${_nextShift!.date} • ${_nextShift!.shiftStartTime}',
-                            style: const TextStyle(
-                                fontSize: 12, color: Colors.grey),
-                          ),
-                      ],
-                    ),
-                  ),
-                ] else if (_loadingNextShift) ...[
-                  const SizedBox(height: 12),
-                  const Row(
-                    children: [
+
+                      const SizedBox(height: 24),
+
+                      // Action Button
                       SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                        height: 56,
+                        child: ElevatedButton(
+                          onPressed: _isClockedIn
+                              ? _manualClockOut
+                              : () {
+                                  // Manual clock-in fallback if geofence fails?
+                                  // For now, disabling manual clock-in to enforce geofence
+                                  // But user might need manual override.
+                                  // Showing snackbar for now.
+                                  _showSnackBar(
+                                      'Please enter the geofence to auto clock-in.',
+                                      isError: true);
+                                },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor:
+                                _isClockedIn ? Colors.red : Colors.grey,
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                          ),
+                          child: Text(
+                            _isClockedIn ? 'End Shift' : 'Auto Clock-in Active',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
                       ),
-                      SizedBox(width: 8),
-                      Text('Loading next shift...'),
+                      if (!_isClockedIn)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: Text(
+                            'Enter the client\'s location to automatically clock in.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey.shade500,
+                            ),
+                          ),
+                        ),
                     ],
                   ),
-                ],
-              ],
-            ),
-          ),
-
-          // Map
-          Expanded(
-            child: _currentPosition == null
-                ? const Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        CircularProgressIndicator(),
-                        SizedBox(height: 16),
-                        Text('Getting location...'),
-                      ],
-                    ),
-                  )
-                : GoogleMap(
-                    initialCameraPosition: CameraPosition(
-                      target: _getInitialCameraPosition(),
-                      zoom: 16,
-                    ),
-                    markers: _markers,
-                    circles: _circles,
-                    polylines: _polylines,
-                    onMapCreated: (controller) async {
-                      _mapController = controller;
-                      
-                      // Center on user location if already available
-                      if (_currentPosition != null && !_hasCenteredOnUser) {
-                        await controller.animateCamera(
-                          CameraUpdate.newLatLngZoom(
-                            LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-                            16,
-                          ),
-                        );
-                        _hasCenteredOnUser = true;
-                      }
-                    },
-                    myLocationEnabled: true,
-                    myLocationButtonEnabled: false, // We have our own button
-                  ),
-          ),
-
-          // Clock in/out buttons
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                if (!_isClockedIn) ...[
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: null, // Geofence auto clock-in
-                      icon: const Icon(Icons.location_on),
-                      label: const Text('Auto Clock-In (Geofence)'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                    ),
-                  ),
-                ] else ...[
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _manualClockOut,
-                      icon: const Icon(Icons.logout),
-                      label: const Text('Clock Out'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                    ),
-                  ),
-                ],
-              ],
+                ),
+              ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// Simple widget to show live duration since start time
+class _LiveTimer extends StatefulWidget {
+  final DateTime startTime;
+  const _LiveTimer({required this.startTime});
+
+  @override
+  State<_LiveTimer> createState() => _LiveTimerState();
+}
+
+class _LiveTimerState extends State<_LiveTimer> {
+  late Timer _timer;
+  String _formattedDuration = '00:00:00';
+
+  @override
+  void initState() {
+    super.initState();
+    _updateTime();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _updateTime());
+  }
+
+  void _updateTime() {
+    final now = DateTime.now().toUtc();
+    final duration = now.difference(widget.startTime);
+    final hours = duration.inHours.toString().padLeft(2, '0');
+    final minutes = (duration.inMinutes % 60).toString().padLeft(2, '0');
+    final seconds = (duration.inSeconds % 60).toString().padLeft(2, '0');
+    if (mounted) {
+      setState(() {
+        _formattedDuration = '$hours:$minutes:$seconds';
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.green.shade50,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.green.shade100),
+      ),
+      child: Text(
+        _formattedDuration,
+        style: TextStyle(
+          color: Colors.green.shade700,
+          fontWeight: FontWeight.bold,
+          fontFamily: 'monospace',
+        ),
       ),
     );
   }

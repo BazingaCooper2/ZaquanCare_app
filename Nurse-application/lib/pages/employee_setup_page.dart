@@ -165,7 +165,7 @@ class _EmployeeSetupPageState extends State<EmployeeSetupPage> {
                 ),
                 const SizedBox(height: 16),
                 DropdownButtonFormField<String>(
-                  value: _selectedPosition,
+                  initialValue: _selectedPosition,
                   decoration: const InputDecoration(
                     labelText: 'Position',
                     prefixIcon: Icon(Icons.work),

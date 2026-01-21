@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 class Client {
   final int clientId;
   final String firstName;
@@ -117,7 +119,7 @@ class Client {
   // Format: "latitude,longitude" (e.g., "43.538165,-80.311467")
   List<double>? get locationCoordinates {
     if (patientLocation == null || patientLocation!.isEmpty) return null;
-    
+
     try {
       final parts = patientLocation!.split(',');
       if (parts.length == 2) {
@@ -127,7 +129,7 @@ class Client {
         ];
       }
     } catch (e) {
-      print('Error parsing patient_location: $e');
+      debugPrint('Error parsing patient_location: $e');
     }
     return null;
   }
@@ -142,4 +144,3 @@ class Client {
     return parts.isNotEmpty ? parts.join(', ') : name;
   }
 }
-

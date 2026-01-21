@@ -185,7 +185,7 @@ class ChatbotService {
   }) async {
     try {
       final token = _client.auth.currentSession?.accessToken ?? _anonKey;
-      final url = "$supabaseUrl/functions/v1/$edgeFunctionName";
+      const url = "$supabaseUrl/functions/v1/$edgeFunctionName";
 
       final body = {
         "emp_id": empId,

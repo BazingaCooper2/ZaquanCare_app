@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:geolocator/geolocator.dart';
+// import 'package:geolocator/geolocator.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 
@@ -124,7 +124,8 @@ Future<void> _initLocalNotifs() async {
   await localNotifs.initialize(
     const InitializationSettings(android: androidInit, iOS: iosInit),
     onDidReceiveNotificationResponse: (resp) async {
-      await Geolocator.openLocationSettings();
+      debugPrint('🔔 Local Notification tapped: ${resp.payload}');
+      // Handle navigation if needed, e.g. based on payload (offersId)
     },
   );
 
@@ -138,6 +139,20 @@ Future<void> _initLocalNotifs() async {
       .resolvePlatformSpecificImplementation<
           IOSFlutterLocalNotificationsPlugin>()
       ?.requestPermissions(alert: true, badge: true, sound: true);
+
+  // Create the notification channel (Android) to ensure sound/pop-up
+  const AndroidNotificationChannel channel = AndroidNotificationChannel(
+    'shift_offers_channel', // id
+    'Shift Offers', // title
+    description: 'Notifications for new shift offers',
+    importance: Importance.max, // Importance.max leads to heads-up notification
+    playSound: true,
+  );
+
+  await localNotifs
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(channel);
 }
 
 /// ✅ Request notification permission & get FCM token
@@ -157,6 +172,9 @@ Future<void> _requestPermissionAndGetToken() async {
   }
 }
 
+/// ✅ Global navigator key for navigation from services
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -164,7 +182,8 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
     return MaterialApp(
-      title: 'Test_app',
+      navigatorKey: navigatorKey, // ✅ Add navigator key
+      title: 'ZaqenCare',
       debugShowCheckedModeBanner: false,
       theme: themeProvider.lightTheme,
       darkTheme: themeProvider.darkTheme,
