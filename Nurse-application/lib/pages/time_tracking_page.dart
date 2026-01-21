@@ -52,13 +52,14 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   // Task state
   List<Task> _tasks = [];
   bool _loadingTasks = false;
+  bool _hasTaskChanges = false; // Track if tasks have been modified
+  bool _updatingTasks = false; // Track if update is in progress
 
   // Assisted-Living locations with 50m geofence
   static const Map<String, LatLng> _locations = {
     'Willow Place': LatLng(43.538165, -80.311467),
     '85 Neeve': LatLng(43.536884, -80.307129),
     '87 Neeve': LatLng(43.536732, -80.307545),
-    'Test Zone (50m North)': LatLng(12.939200, 80.131500),
   };
 
   static const double _geofenceRadius = 50.0; // meters
@@ -148,24 +149,71 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       }
 
       // Get today's date
-      final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final now = DateTime.now();
+      final today = DateFormat('yyyy-MM-dd').format(now);
+      debugPrint(
+          '🔍 Loading next shift for emp_id=$empId, today=$today, time=${TimeOfDay.fromDateTime(now)}');
 
-      // Fetch next upcoming shift from shift table
+      // Fetch upcoming shifts from shift table (today and future)
       final response = await supabase
           .from('shift')
           .select('*')
           .eq('emp_id', empId)
-          .gte('date', today)
-          .order('date')
-          .order('shift_start_time');
+          .gte('date',
+              today); // Fetch all for today+ and sort in Dart to be safe
+
+      debugPrint('📥 Fetched ${response.length} shifts from today onwards');
 
       // Filter for scheduled or in_progress shifts
       final filteredShifts = response.where((shiftData) {
         final status = shiftData['shift_status']?.toString().toLowerCase();
-        return status == 'scheduled' ||
+        final isValidStatus = status == 'scheduled' ||
             status == 'in_progress' ||
             status == 'in progress';
+        return isValidStatus;
       }).toList();
+
+      // Sort in Dart to generally handle time strings (e.g. "9:00" vs "10:00") matching Dashboard logic
+      filteredShifts.sort((a, b) {
+        try {
+          // Compare Dates
+          final dateA = DateTime.parse(a['date'] ?? '');
+          final dateB = DateTime.parse(b['date'] ?? '');
+          final dateComparison = dateA.compareTo(dateB);
+          if (dateComparison != 0) return dateComparison;
+
+          // Compare Times
+          final timeA = a['shift_start_time'] ?? '';
+          final timeB = b['shift_start_time'] ?? '';
+
+          // Handle simple string compare first
+          // If formats are "HH:mm", simple string compare works IF padded (09:00 vs 10:00)
+          // To be safe, parse hours/minutes
+          final partsA = timeA.toString().split(':');
+          final partsB = timeB.toString().split(':');
+
+          if (partsA.length >= 2 && partsB.length >= 2) {
+            final hourA = int.parse(partsA[0]);
+            final hourB = int.parse(partsB[0]);
+            if (hourA != hourB) return hourA.compareTo(hourB);
+
+            final minA = int.parse(partsA[1]);
+            final minB = int.parse(partsB[1]);
+            return minA.compareTo(minB);
+          }
+
+          return timeA.toString().compareTo(timeB.toString());
+        } catch (_) {
+          return 0;
+        }
+      });
+
+      debugPrint(
+          '📋 After filtering & sorting: ${filteredShifts.length} upcoming shifts');
+      if (filteredShifts.isNotEmpty) {
+        debugPrint(
+            '🥇 #1 Shift: ID=${filteredShifts.first['shift_id']}, Time=${filteredShifts.first['shift_start_time']}');
+      }
 
       if (filteredShifts.isNotEmpty) {
         final shift = Shift.fromJson(filteredShifts.first);
@@ -190,6 +238,11 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
           _loadingNextShift = false;
         });
 
+        debugPrint(
+            '✅ Loaded shift ${shift.shiftId} for client_id ${shift.clientId}');
+        debugPrint('✅ Client loaded: ${client?.fullName ?? "No client"}');
+        debugPrint('✅ Client address: ${client?.fullAddress ?? "No address"}');
+
         // Update route if we have both current position and client location
         if (_currentPosition != null && client != null) {
           _updateRouteToClient();
@@ -198,12 +251,15 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         // Load tasks for this shift
         _loadTasks();
       } else {
+        debugPrint('⚠️ No upcoming shifts found');
         setState(() {
+          _nextShift = null;
+          _nextClient = null;
           _loadingNextShift = false;
         });
       }
     } catch (e) {
-      debugPrint('Error loading next shift: $e');
+      debugPrint('❌ Error loading next shift: $e');
       setState(() {
         _loadingNextShift = false;
       });
@@ -292,27 +348,74 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   }
 
   Future<void> _checkGeofenceEntry(Position position) async {
-    // 1. Handle Auto Clock-IN
-    if (!_isClockedIn) {
-      for (final entry in _locations.entries) {
-        final placeName = entry.key;
-        final location = entry.value;
+    // 1. Check if we are inside ANY monitored location
+    String? detectedPlace;
+    double? distToPlace;
 
-        final distance = _calculateDistance(
-          position.latitude,
-          position.longitude,
-          location.latitude,
-          location.longitude,
-        );
+    for (final entry in _locations.entries) {
+      final placeName = entry.key;
+      final location = entry.value;
 
-        if (distance <= _geofenceRadius) {
-          await _autoClockIn(placeName, position);
-          break; // Stop after finding the first valid location
+      final distance = _calculateDistance(
+        position.latitude,
+        position.longitude,
+        location.latitude,
+        location.longitude,
+      );
+
+      // Check strictly inside radius
+      if (distance <= _geofenceRadius) {
+        detectedPlace = placeName;
+        distToPlace = distance;
+        break; // Found our location
+      }
+    }
+
+    // 2. Logic Control
+    if (detectedPlace != null) {
+      // ✅ INSIDE A GEOFENCE
+      if (!_isClockedIn) {
+        // Not clocked in? -> Auto Clock IN
+        debugPrint(
+            '📍 Entered $detectedPlace ($distToPlace m). Auto Clocking In...');
+        await _autoClockIn(detectedPlace, position);
+      } else {
+        // Already clocked in.
+        // Optional: switch location if they moved from Place A to Place B instantly (rare)
+        if (_currentPlaceName != detectedPlace) {
+          debugPrint(
+              '📍 Changed location from $_currentPlaceName to $detectedPlace. Updating...');
+          // For now, assume they are just "working". We could update the log, but simpler to leave as is.
+        }
+      }
+    } else {
+      // ❌ OUTSIDE ALL GEOFENCES
+      if (_isClockedIn) {
+        // We are clocked in, but now outside.
+        // Apply a small "exit buffer" to prevent jitter (e.g. GPS drift at the edge)
+        // Check distance to the place we are supposedly clocked in at
+        bool confirmedOutside = true;
+
+        if (_currentPlaceName != null &&
+            _locations.containsKey(_currentPlaceName)) {
+          final loc = _locations[_currentPlaceName]!;
+          final dist = _calculateDistance(position.latitude, position.longitude,
+              loc.latitude, loc.longitude);
+
+          // Buffer: Geofence Radius + 20 meters.
+          // If they are within 70m, consider them still "there" to avoid accidental clock-outs.
+          if (dist <= _geofenceRadius + 20) {
+            confirmedOutside = false;
+          }
+        }
+
+        if (confirmedOutside) {
+          debugPrint('📍 Exited $_currentPlaceName. Auto Clocking Out...');
+          _showSnackBar('📍 Exited geofence. Auto Clocking Out...');
+          await _autoClockOut(position);
         }
       }
     }
-    // 2. Handle Auto Clock-OUT - REMOVED per user request
-    // Now controlled by Task Completion
   }
 
   Future<void> _updateRouteToClient() async {
@@ -467,6 +570,19 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       }).select('id');
 
       if (response.isNotEmpty) {
+        // Also update the shift table if we have an active shift
+        if (_nextShift != null) {
+          try {
+            await supabase.from('shift').update({
+              'clock_in': nowUtc.toIso8601String(),
+              'shift_status': 'in_progress'
+            }).eq('shift_id', _nextShift!.shiftId);
+            debugPrint('✅ Updated shift table with clock_in time');
+          } catch (e) {
+            debugPrint('⚠️ Failed to update shift table clock_in: $e');
+          }
+        }
+
         setState(() {
           _isClockedIn = true;
           _currentPlaceName = placeName;
@@ -546,6 +662,20 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
       await update;
 
+      // Also update the shift table if we have an active shift
+      if (_nextShift != null) {
+        try {
+          await supabase.from('shift').update({
+            'clock_out': nowUtc.toIso8601String(),
+            'shift_status': 'completed'
+          }).eq('shift_id', _nextShift!.shiftId);
+          debugPrint(
+              '✅ Updated shift table with clock_out time and completed status');
+        } catch (e) {
+          debugPrint('⚠️ Failed to update shift table clock_out: $e');
+        }
+      }
+
       final placeName = _currentPlaceName ?? 'Location';
       _showSnackBar(
           '👋 Left $placeName. Auto Clocked OUT. (${totalHours.toStringAsFixed(2)} hrs)');
@@ -556,6 +686,9 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         _currentPlaceName = null;
         _clockInTimeUtc = null;
       });
+
+      // Refresh to load next shift after completing current one
+      _loadNextUpcomingShift();
     } catch (e) {
       if (e.toString().contains('42501') || e.toString().contains('policy')) {
         _showSnackBar('⚠️ Database Permission Error (Check RLS Policies)',
@@ -569,14 +702,6 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         _showSnackBar('Error clocking out: $e', isError: true);
       }
     }
-  }
-
-  Future<void> _manualClockOut() async {
-    if (!_isClockedIn || _currentLogId == null || _currentPosition == null) {
-      return;
-    }
-    // Re-use auto clock out logic but from current param
-    await _autoClockOut(_currentPosition!);
   }
 
   void _setupMapMarkersAndCircles() {
@@ -671,6 +796,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
     setState(() {
       _loadingTasks = true;
+      _hasTaskChanges = false; // Reset changes flag when loading new tasks
     });
 
     try {
@@ -731,7 +857,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     }
   }
 
-  Future<void> _toggleTask(Task task, bool value) async {
+  void _toggleTask(Task task, bool value) {
     final index = _tasks.indexWhere((t) => t.taskId == task.taskId);
     if (index == -1) return;
 
@@ -745,34 +871,50 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
     setState(() {
       _tasks[index] = updatedTask;
+      _hasTaskChanges = true; // Mark that tasks have been modified
+    });
+  }
+
+  Future<void> _updateTasksAndComplete() async {
+    if (!_hasTaskChanges) return;
+
+    setState(() {
+      _updatingTasks = true;
     });
 
     try {
-      await supabase
-          .from('tasks')
-          .update({'status': value}).eq('task_id', task.taskId);
+      // Update all tasks in the database
+      for (final task in _tasks) {
+        await supabase
+            .from('tasks')
+            .update({'status': task.status}).eq('task_id', task.taskId);
+      }
 
-      // Check for auto clock-out
-      if (value && _isClockedIn) {
+      _showSnackBar('✅ Tasks updated successfully');
+
+      setState(() {
+        _hasTaskChanges = false;
+        _updatingTasks = false;
+      });
+
+      // Check if all tasks are complete for auto clock-out
+      if (_isClockedIn) {
         final allDone = _tasks.every((t) => t.status);
-        if (allDone) {
-          // Trigger auto clock out with a small delay
-          if (mounted && _currentPosition != null) {
-            Future.delayed(const Duration(milliseconds: 1000), () {
-              if (mounted) {
-                _autoClockOut(_currentPosition!);
-              }
-            });
+        if (allDone && _currentPosition != null) {
+          _showSnackBar('🎉 All tasks complete! Clocking out...');
+          // Delay to show the success message
+          await Future.delayed(const Duration(milliseconds: 1500));
+          if (mounted) {
+            await _autoClockOut(_currentPosition!);
           }
         }
       }
     } catch (e) {
-      // Revert on error
       if (mounted) {
         setState(() {
-          _tasks[index] = task;
+          _updatingTasks = false;
         });
-        _showSnackBar('Error updating task: $e', isError: true);
+        _showSnackBar('Error updating tasks: $e', isError: true);
       }
     }
   }
@@ -1114,12 +1256,66 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
                                         ),
                                         const SizedBox(height: 2),
                                         Text(
-                                          '${_nextShift!.date} • ${_nextShift!.shiftStartTime}',
+                                          '${_nextShift!.date} • ${_nextShift!.formattedTimeRange}',
                                           style: TextStyle(
                                             color: Colors.grey.shade600,
                                             fontSize: 12,
                                           ),
                                         ),
+                                        if (_nextClient!
+                                            .fullAddress.isNotEmpty) ...[
+                                          const SizedBox(height: 4),
+                                          Row(
+                                            children: [
+                                              Icon(Icons.location_on_outlined,
+                                                  size: 14,
+                                                  color: Colors.grey.shade500),
+                                              const SizedBox(width: 4),
+                                              Expanded(
+                                                child: Text(
+                                                  _nextClient!.fullAddress,
+                                                  style: TextStyle(
+                                                    color: Colors.grey.shade500,
+                                                    fontSize: 11,
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ],
+                                        if (_currentPosition != null &&
+                                            _nextClient!.locationCoordinates !=
+                                                null) ...[
+                                          const SizedBox(height: 4),
+                                          Row(
+                                            children: [
+                                              Icon(Icons.directions_walk,
+                                                  size: 14,
+                                                  color: Colors.blue.shade400),
+                                              const SizedBox(width: 4),
+                                              Text(
+                                                '${(_calculateDistance(
+                                                      _currentPosition!
+                                                          .latitude,
+                                                      _currentPosition!
+                                                          .longitude,
+                                                      _nextClient!
+                                                          .locationCoordinates![0],
+                                                      _nextClient!
+                                                          .locationCoordinates![1],
+                                                    ) / 1000).toStringAsFixed(2)} km away',
+                                                style: TextStyle(
+                                                  color: Colors.blue.shade600,
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.w500,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ],
                                       ],
                                     ),
                                   ),
@@ -1195,39 +1391,71 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
                       const SizedBox(height: 24),
 
-                      // Action Button
-                      SizedBox(
-                        height: 56,
-                        child: ElevatedButton(
-                          onPressed: _isClockedIn
-                              ? _manualClockOut
-                              : () {
-                                  // Manual clock-in fallback if geofence fails?
-                                  // For now, disabling manual clock-in to enforce geofence
-                                  // But user might need manual override.
-                                  // Showing snackbar for now.
-                                  _showSnackBar(
-                                      'Please enter the geofence to auto clock-in.',
-                                      isError: true);
-                                },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor:
-                                _isClockedIn ? Colors.red : Colors.grey,
-                            foregroundColor: Colors.white,
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
+                      // Update Tasks Button (only shows when clocked in)
+                      if (_isClockedIn)
+                        SizedBox(
+                          height: 56,
+                          child: ElevatedButton(
+                            onPressed: (_hasTaskChanges && !_updatingTasks)
+                                ? _updateTasksAndComplete
+                                : null,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: _hasTaskChanges
+                                  ? Colors.blue
+                                  : Colors.grey.shade300,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              disabledBackgroundColor: Colors.grey.shade300,
+                              disabledForegroundColor: Colors.grey.shade500,
                             ),
+                            child: _updatingTasks
+                                ? const Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      SizedBox(
+                                        width: 20,
+                                        height: 20,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                      SizedBox(width: 12),
+                                      Text(
+                                        'Updating...',
+                                        style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                : Text(
+                                    _hasTaskChanges
+                                        ? 'Update Tasks & Complete'
+                                        : 'No Changes',
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
                           ),
+                        ),
+                      if (_isClockedIn && _hasTaskChanges)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12),
                           child: Text(
-                            _isClockedIn ? 'End Shift' : 'Auto Clock-in Active',
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
+                            'Tap to save changes. Auto clock-out if all tasks done.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey.shade500,
                             ),
                           ),
                         ),
-                      ),
                       if (!_isClockedIn)
                         Padding(
                           padding: const EdgeInsets.only(top: 12),

@@ -20,7 +20,8 @@ class _ShiftPageState extends State<ShiftPage> {
   bool _isLoading = true;
 
   // Date filter state
-  String _selectedDateFilter = 'All'; // 'Today', 'This Week', 'All'
+  String _selectedDateFilter =
+      'Next Scheduled'; // 'Today', 'This Week', 'Next Scheduled', 'All'
 
   // Status filter state
   final Set<String> _selectedStatuses = {}; // Empty means show all
@@ -45,7 +46,6 @@ class _ShiftPageState extends State<ShiftPage> {
         return;
       }
 
-      // Count rows in shift table
       final countResponse =
           await supabase.from('shift').select('count').single();
 
@@ -62,10 +62,81 @@ class _ShiftPageState extends State<ShiftPage> {
           .order('shift_start_time');
 
       debugPrint('📥 Raw fetched rows = ${response.length}');
-      debugPrint('📥 Raw shift data = $response');
 
-      final shifts =
-          response.map<Shift>((json) => Shift.fromJson(json)).toList();
+      // Get unique client IDs
+      final clientIds = response
+          .where((s) => s['client_id'] != null)
+          .map((s) => s['client_id'] as int)
+          .toSet()
+          .toList();
+
+      debugPrint('📋 Unique client IDs to fetch: $clientIds');
+
+      // Fetch all clients in bulk
+      Map<int, Map<String, dynamic>> clientsMap = {};
+      if (clientIds.isNotEmpty) {
+        try {
+          debugPrint('🔍 Attempting to fetch clients with IDs: $clientIds');
+
+          final clientsResponse = await supabase
+              .from('client')
+              .select(
+                  'client_id, name, patient_location, address_line1, city, province')
+              .inFilter('client_id', clientIds);
+
+          debugPrint('👥 Fetched ${clientsResponse.length} clients');
+          debugPrint('👥 Client response data: $clientsResponse');
+
+          for (var client in clientsResponse) {
+            clientsMap[client['client_id']] = client;
+            debugPrint(
+                '  ✅ Loaded client ${client['client_id']}: ${client['name']}');
+          }
+        } catch (e, stack) {
+          debugPrint('⚠️ Error fetching clients: $e');
+          debugPrint('⚠️ Stack trace: $stack');
+        }
+      }
+
+      // Parse shifts and attach client data
+      final shifts = <Shift>[];
+      for (var json in response) {
+        final clientId = json['client_id'] as int?;
+        final clientData = clientId != null ? clientsMap[clientId] : null;
+
+        // Add client data to JSON
+        if (clientData != null) {
+          json['client_name'] = clientData['name'];
+
+          // Build location string from available data
+          final locationParts = <String>[];
+          if (clientData['patient_location'] != null &&
+              clientData['patient_location'].toString().isNotEmpty) {
+            locationParts.add(clientData['patient_location']);
+          } else {
+            // Fallback to address fields
+            if (clientData['address_line1'] != null &&
+                clientData['address_line1'].toString().isNotEmpty) {
+              locationParts.add(clientData['address_line1']);
+            }
+            if (clientData['city'] != null &&
+                clientData['city'].toString().isNotEmpty) {
+              locationParts.add(clientData['city']);
+            }
+            if (clientData['province'] != null &&
+                clientData['province'].toString().isNotEmpty) {
+              locationParts.add(clientData['province']);
+            }
+          }
+
+          json['client_location'] =
+              locationParts.isNotEmpty ? locationParts.join(', ') : null;
+          debugPrint(
+              '✅ Attached client data for shift ${json['shift_id']}: ${clientData['name']} at ${json['client_location']}');
+        }
+
+        shifts.add(Shift.fromJson(json));
+      }
 
       setState(() {
         _allShifts = shifts;
@@ -126,6 +197,44 @@ class _ShiftPageState extends State<ShiftPage> {
           return false;
         }
       }).toList();
+    } else if (_selectedDateFilter == 'Next Scheduled') {
+      // Show only upcoming shifts
+      filtered = filtered.where((shift) {
+        if (shift.date == null) return false;
+        try {
+          final shiftDate = DateTime.parse(shift.date!);
+          final shiftDateOnly =
+              DateTime(shiftDate.year, shiftDate.month, shiftDate.day);
+
+          // Include today and future dates
+          if (shiftDateOnly.isBefore(today)) {
+            return false;
+          }
+
+          // Show all shifts from today onwards
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }).toList();
+
+      // Sort by date and time (earliest first)
+      filtered.sort((a, b) {
+        try {
+          final dateA = DateTime.parse(a.date ?? '');
+          final dateB = DateTime.parse(b.date ?? '');
+
+          final comparison = dateA.compareTo(dateB);
+          if (comparison != 0) return comparison;
+
+          // If same date, sort by start time
+          final timeA = a.shiftStartTime ?? '';
+          final timeB = b.shiftStartTime ?? '';
+          return timeA.compareTo(timeB);
+        } catch (_) {
+          return 0;
+        }
+      });
     }
 
     if (_selectedStatuses.isNotEmpty) {
@@ -189,13 +298,19 @@ class _ShiftPageState extends State<ShiftPage> {
                         ),
                       ],
                     ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                        _buildDateFilterChip('Today', theme),
-                        _buildDateFilterChip('This Week', theme),
-                        _buildDateFilterChip('All', theme),
-                      ],
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          _buildDateFilterChip('Next Scheduled', theme),
+                          const SizedBox(width: 8),
+                          _buildDateFilterChip('Today', theme),
+                          const SizedBox(width: 8),
+                          _buildDateFilterChip('This Week', theme),
+                          const SizedBox(width: 8),
+                          _buildDateFilterChip('All', theme),
+                        ],
+                      ),
                     ),
                   ),
 
@@ -315,8 +430,7 @@ class _ShiftPageState extends State<ShiftPage> {
 
   Widget _buildShiftCard(Shift shift, ThemeData theme) {
     final date = shift.date ?? 'No date';
-    final start = shift.shiftStartTime ?? 'No start time';
-    final end = shift.shiftEndTime ?? 'No end time';
+    final timeRange = shift.formattedTimeRange; // Use 12-hour format
     final statusColor = shift.statusColor;
     final statusText = shift.statusDisplayText;
     final normalized = shift.shiftStatus?.toLowerCase().replaceAll(' ', '_');
@@ -353,7 +467,19 @@ class _ShiftPageState extends State<ShiftPage> {
                         const SizedBox(height: 12),
                         _buildInfoRow('🗓', date, theme),
                         const SizedBox(height: 8),
-                        _buildInfoRow('⏰', '$start - $end', theme),
+                        _buildInfoRow('⏰', timeRange, theme),
+                        // Client Name
+                        if (shift.clientName != null &&
+                            shift.clientName!.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          _buildInfoRow('👤', shift.clientName!, theme),
+                        ],
+                        // Client Location
+                        if (shift.clientLocation != null &&
+                            shift.clientLocation!.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          _buildInfoRow('📍', shift.clientLocation!, theme),
+                        ],
                       ],
                     ),
                   ),
