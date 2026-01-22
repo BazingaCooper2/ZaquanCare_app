@@ -12,7 +12,10 @@ import '../models/employee.dart';
 import '../models/shift.dart';
 import '../models/client.dart';
 import '../models/task_model.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:nurse_tracking_app/services/session.dart';
+import 'package:nurse_tracking_app/services/directions_service.dart';
+import 'package:nurse_tracking_app/config/api_config.dart';
 
 class TimeTrackingPage extends StatefulWidget {
   final Employee employee;
@@ -44,16 +47,19 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   final Set<Polyline> _polylines = {};
   bool _hasCenteredOnUser = false;
 
-  // Next shift and client state
-  Shift? _nextShift;
-  Client? _nextClient;
-  bool _loadingNextShift = false;
+  // Active shift and client state (Authoritative Source of Truth)
+  Shift? _activeShift;
+  Client? _activeClient;
+  bool _loadingActiveShift = false;
 
   // Task state
   List<Task> _tasks = [];
   bool _loadingTasks = false;
-  bool _hasTaskChanges = false; // Track if tasks have been modified
   bool _updatingTasks = false; // Track if update is in progress
+
+  // Route state
+  String? _routeDistance;
+  String? _routeDuration;
 
   // Assisted-Living locations with 50m geofence
   static const Map<String, LatLng> _locations = {
@@ -63,16 +69,26 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   };
 
   static const double _geofenceRadius = 50.0; // meters
-  static const String _googleMapsApiKey =
-      'AIzaSyAVQpP_nIRtt5-gNFMZyxzfFC9yzYKQgFE';
 
   @override
   void initState() {
     super.initState();
-    _checkActiveClockInStatus(); // Check for existing session first
-    _requestLocationPermission();
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    await _requestLocationPermission();
+
+    // 1. Check for existing session and restore it (PRIORITY)
+    await _checkActiveClockInStatus();
+
+    // 2. If no active session restored, load the next schedule
+    if (_activeShift == null) {
+      await _loadActiveShift();
+    }
+
+    // 3. Setup map based on whatever client we found
     _setupMapMarkersAndCircles();
-    _loadNextUpcomingShift();
   }
 
   Future<void> _checkActiveClockInStatus() async {
@@ -108,6 +124,8 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
           }
         }
 
+        // Manual Shift Restore removed as RPC handles it now.
+
         setState(() {
           _isClockedIn = true;
           _currentPlaceName = matchedPlace;
@@ -134,90 +152,49 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     super.dispose();
   }
 
-  Future<void> _loadNextUpcomingShift() async {
+  Future<Shift?> fetchActiveShift(int empId) async {
+    debugPrint('🚨 Fetching ACTIVE SHIFT via RPC (Single Source of Truth)');
+    try {
+      final response =
+          await supabase.rpc('get_active_shift', params: {'p_emp_id': empId});
+
+      debugPrint('📥 RPC Raw Response: $response');
+
+      if (response == null) return null;
+
+      if (response is List) {
+        if (response.isEmpty) return null;
+        return Shift.fromJson(response.first);
+      }
+
+      if (response is Map) {
+        return Shift.fromJson(response as Map<String, dynamic>);
+      }
+
+      return null;
+    } catch (e) {
+      debugPrint('❌ Error fetching active shift: $e');
+      return null;
+    }
+  }
+
+  Future<void> _loadActiveShift() async {
     setState(() {
-      _loadingNextShift = true;
+      _loadingActiveShift = true;
     });
 
     try {
       final empId = await SessionManager.getEmpId();
       if (empId == null) {
         setState(() {
-          _loadingNextShift = false;
+          _loadingActiveShift = false;
         });
         return;
       }
 
-      // Get today's date
-      final now = DateTime.now();
-      final today = DateFormat('yyyy-MM-dd').format(now);
-      debugPrint(
-          '🔍 Loading next shift for emp_id=$empId, today=$today, time=${TimeOfDay.fromDateTime(now)}');
+      final shift = await fetchActiveShift(empId);
 
-      // Fetch upcoming shifts from shift table (today and future)
-      final response = await supabase
-          .from('shift')
-          .select('*')
-          .eq('emp_id', empId)
-          .gte('date',
-              today); // Fetch all for today+ and sort in Dart to be safe
-
-      debugPrint('📥 Fetched ${response.length} shifts from today onwards');
-
-      // Filter for scheduled or in_progress shifts
-      final filteredShifts = response.where((shiftData) {
-        final status = shiftData['shift_status']?.toString().toLowerCase();
-        final isValidStatus = status == 'scheduled' ||
-            status == 'in_progress' ||
-            status == 'in progress';
-        return isValidStatus;
-      }).toList();
-
-      // Sort in Dart to generally handle time strings (e.g. "9:00" vs "10:00") matching Dashboard logic
-      filteredShifts.sort((a, b) {
-        try {
-          // Compare Dates
-          final dateA = DateTime.parse(a['date'] ?? '');
-          final dateB = DateTime.parse(b['date'] ?? '');
-          final dateComparison = dateA.compareTo(dateB);
-          if (dateComparison != 0) return dateComparison;
-
-          // Compare Times
-          final timeA = a['shift_start_time'] ?? '';
-          final timeB = b['shift_start_time'] ?? '';
-
-          // Handle simple string compare first
-          // If formats are "HH:mm", simple string compare works IF padded (09:00 vs 10:00)
-          // To be safe, parse hours/minutes
-          final partsA = timeA.toString().split(':');
-          final partsB = timeB.toString().split(':');
-
-          if (partsA.length >= 2 && partsB.length >= 2) {
-            final hourA = int.parse(partsA[0]);
-            final hourB = int.parse(partsB[0]);
-            if (hourA != hourB) return hourA.compareTo(hourB);
-
-            final minA = int.parse(partsA[1]);
-            final minB = int.parse(partsB[1]);
-            return minA.compareTo(minB);
-          }
-
-          return timeA.toString().compareTo(timeB.toString());
-        } catch (_) {
-          return 0;
-        }
-      });
-
-      debugPrint(
-          '📋 After filtering & sorting: ${filteredShifts.length} upcoming shifts');
-      if (filteredShifts.isNotEmpty) {
-        debugPrint(
-            '🥇 #1 Shift: ID=${filteredShifts.first['shift_id']}, Time=${filteredShifts.first['shift_start_time']}');
-      }
-
-      if (filteredShifts.isNotEmpty) {
-        final shift = Shift.fromJson(filteredShifts.first);
-
+      if (shift != null) {
         // Fetch client details if client_id exists
         Client? client;
         if (shift.clientId != null) {
@@ -261,9 +238,9 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         }
 
         setState(() {
-          _nextShift = shift;
-          _nextClient = client;
-          _loadingNextShift = false;
+          _activeShift = shift;
+          _activeClient = client;
+          _loadingActiveShift = false;
           _setupMapMarkersAndCircles(); // Refresh markers/geofences
         });
 
@@ -280,17 +257,17 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         // Load tasks for this shift
         _loadTasks();
       } else {
-        debugPrint('⚠️ No upcoming shifts found');
+        debugPrint('⚠️ No active shifts found');
         setState(() {
-          _nextShift = null;
-          _nextClient = null;
-          _loadingNextShift = false;
+          _activeShift = null;
+          _activeClient = null;
+          _loadingActiveShift = false;
         });
       }
     } catch (e) {
-      debugPrint('❌ Error loading next shift: $e');
+      debugPrint('❌ Error loading active shift: $e');
       setState(() {
-        _loadingNextShift = false;
+        _loadingActiveShift = false;
       });
     }
   }
@@ -367,9 +344,9 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       // Check for geofence entry at assisted living locations
       await _checkGeofenceEntry(position);
 
-      // Update map markers and route
+      // Update map markers
       _updateMapMarkers();
-      _updateRouteToClient();
+      // _updateRouteToClient(); // Disabled to save API calls (User triggered only)
     } catch (e) {
       debugPrint('❌ Location error: $e');
       _showSnackBar('Location error: $e', isError: true);
@@ -381,28 +358,9 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     String? detectedPlace;
     double? distToPlace;
 
-    for (final entry in _locations.entries) {
-      final placeName = entry.key;
-      final location = entry.value;
-
-      final distance = _calculateDistance(
-        position.latitude,
-        position.longitude,
-        location.latitude,
-        location.longitude,
-      );
-
-      // Check strictly inside radius
-      if (distance <= _geofenceRadius) {
-        detectedPlace = placeName;
-        distToPlace = distance;
-        break; // Found our location
-      }
-    }
-
-    // Check dynamic client location (e.g. Outreach) if not found in static list
-    if (detectedPlace == null && _nextClient != null) {
-      final coords = _nextClient!.locationCoordinates;
+    // Check dynamic client location (Active Shift)
+    if (_activeClient != null) {
+      final coords = _activeClient!.locationCoordinates;
       if (coords != null && coords.length >= 2) {
         final clientLat = coords[0];
         final clientLng = coords[1];
@@ -410,9 +368,33 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
             position.latitude, position.longitude, clientLat, clientLng);
 
         if (dist <= _geofenceRadius) {
-          // Use service type as place name, or fallback to client name
-          detectedPlace = _nextClient!.serviceType ?? _nextClient!.fullName;
+          // Use client name as the detected place
+          detectedPlace = _activeClient!.fullName;
           distToPlace = dist;
+          debugPrint(
+              '🎯 Match found: ${_activeClient!.fullName} (Shift Client)');
+        }
+      }
+    }
+
+    // B. SECONDARY: Check static assisted living locations (ONLY if not already matched)
+    if (detectedPlace == null) {
+      for (final entry in _locations.entries) {
+        final placeName = entry.key;
+        final location = entry.value;
+
+        final distance = _calculateDistance(
+          position.latitude,
+          position.longitude,
+          location.latitude,
+          location.longitude,
+        );
+
+        if (distance <= _geofenceRadius) {
+          detectedPlace = placeName;
+          distToPlace = distance;
+          debugPrint('🎯 Match found: $placeName (Static Location)');
+          break;
         }
       }
     }
@@ -450,13 +432,13 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
             targetLng = _locations[_currentPlaceName]!.longitude;
           }
           // Check dynamic client location (match loosely by name or if we just assume current client)
-          else if (_nextClient != null) {
+          else if (_activeClient != null) {
             // If the current place name matches service type or client name
-            final sType = _nextClient!.serviceType ?? '';
-            final cName = _nextClient!.fullName;
+            final sType = _activeClient!.serviceType ?? '';
+            final cName = _activeClient!.fullName;
 
             if (_currentPlaceName == sType || _currentPlaceName == cName) {
-              final coords = _nextClient!.locationCoordinates;
+              final coords = _activeClient!.locationCoordinates;
               if (coords != null && coords.length >= 2) {
                 targetLat = coords[0];
                 targetLng = coords[1];
@@ -489,35 +471,35 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   }
 
   Future<void> _updateRouteToClient() async {
-    if (_currentPosition == null || _nextClient == null) return;
+    if (_activeClient == null) return;
 
-    final coordinates = _nextClient!.locationCoordinates;
+    // Use fallback to URL Launch if coordinates missing or backend route fails
+    final coordinates = _activeClient!.locationCoordinates;
+
     if (coordinates == null || coordinates.length < 2) return;
+
+    // Only try backend route if we have positions.
+    // This function will NOT launch external maps automatically.
+    if (_currentPosition == null) return;
 
     final destinationLat = coordinates[0];
     final destinationLng = coordinates[1];
 
     try {
-      // Use Google Directions API to get route
-      final origin =
-          '${_currentPosition!.latitude},${_currentPosition!.longitude}';
-      final destination = '$destinationLat,$destinationLng';
-
-      final url = Uri.parse(
-        'https://maps.googleapis.com/maps/api/directions/json?origin=$origin&destination=$destination&key=$_googleMapsApiKey',
+      final directionsService = DirectionsService();
+      final result = await directionsService.getDirections(
+        origin: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        destination: LatLng(destinationLat, destinationLng),
       );
 
-      final response = await http.get(url);
-      final data = json.decode(response.body);
-
-      if (data['status'] == 'OK' && data['routes'].isNotEmpty) {
-        final route = data['routes'][0];
-        final overviewPolyline = route['overview_polyline']['points'];
-
+      if (result != null) {
         // Decode polyline points
-        final points = _decodePolyline(overviewPolyline);
+        final points = _decodePolyline(result.polylineEncoded);
 
         setState(() {
+          _routeDistance = result.distance;
+          _routeDuration = result.duration;
+
           _polylines.clear();
           _polylines.add(
             Polyline(
@@ -530,8 +512,10 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
           );
         });
 
-        // Update camera to show both locations
+        // Update camera to show both locations if we have a valid route
         if (_mapController != null && points.isNotEmpty) {
+          // Optional: Only move camera if user explicitly requested route or on first load
+          // For now, we update the bounds to make sure the route is visible
           await _mapController!.animateCamera(
             CameraUpdate.newLatLngBounds(
               _boundsFromLatLngList([
@@ -545,6 +529,34 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       }
     } catch (e) {
       debugPrint('Error updating route: $e');
+    }
+  }
+
+  Future<void> _launchExternalMaps() async {
+    if (_activeClient == null) return;
+
+    final coordinates = _activeClient!.locationCoordinates;
+    String url;
+
+    if (coordinates != null && coordinates.length >= 2) {
+      // Use coordinates
+      url =
+          'https://www.google.com/maps/dir/?api=1&destination=${coordinates[0]},${coordinates[1]}';
+    } else if (_activeClient!.fullAddress.isNotEmpty) {
+      // Use address
+      final encodedAddress = Uri.encodeComponent(_activeClient!.fullAddress);
+      url =
+          'https://www.google.com/maps/dir/?api=1&destination=$encodedAddress';
+    } else {
+      _showSnackBar('No location data available for directions.',
+          isError: true);
+      return;
+    }
+
+    if (await canLaunchUrl(Uri.parse(url))) {
+      await launchUrl(Uri.parse(url));
+    } else {
+      _showSnackBar('Could not launch maps.', isError: true);
     }
   }
 
@@ -631,7 +643,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
       final response = await supabase.from('time_logs').insert({
         'emp_id': empId,
-        // 'schedule_id': _nextShift?.shiftId.toString(), // schema mismatch
+        // 'schedule_id': _activeShift?.shiftId.toString(), // schema mismatch
         'clock_in_time': nowUtc.toIso8601String(),
         'clock_in_latitude': lat,
         'clock_in_longitude': lng,
@@ -641,12 +653,12 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
       if (response.isNotEmpty) {
         // Also update the shift table if we have an active shift
-        if (_nextShift != null) {
+        if (_activeShift != null) {
           try {
             await supabase.from('shift').update({
               'clock_in': nowUtc.toIso8601String(),
               'shift_status': 'in_progress'
-            }).eq('shift_id', _nextShift!.shiftId);
+            }).eq('shift_id', _activeShift!.shiftId);
             debugPrint('✅ Updated shift table with clock_in time');
           } catch (e) {
             debugPrint('⚠️ Failed to update shift table clock_in: $e');
@@ -733,12 +745,12 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       await update;
 
       // Also update the shift table if we have an active shift
-      if (_nextShift != null) {
+      if (_activeShift != null) {
         try {
           await supabase.from('shift').update({
             'clock_out': nowUtc.toIso8601String(),
             'shift_status': 'completed'
-          }).eq('shift_id', _nextShift!.shiftId);
+          }).eq('shift_id', _activeShift!.shiftId);
           debugPrint(
               '✅ Updated shift table with clock_out time and completed status');
         } catch (e) {
@@ -758,7 +770,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       });
 
       // Refresh to load next shift after completing current one
-      _loadNextUpcomingShift();
+      _loadActiveShift();
     } catch (e) {
       if (e.toString().contains('42501') || e.toString().contains('policy')) {
         _showSnackBar('⚠️ Database Permission Error (Check RLS Policies)',
@@ -785,7 +797,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
       // Check if this location matches the client's service type
       // Using loose comparison (ignoring case/trim)
-      final clientServiceType = _nextClient?.serviceType?.trim() ?? '';
+      final clientServiceType = _activeClient?.serviceType?.trim() ?? '';
       final isTargetLocation =
           clientServiceType.toLowerCase() == placeName.toLowerCase();
 
@@ -820,22 +832,22 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     }
 
     // Add patient destination marker if we have next client AND it's not already covered by known locations
-    if (_nextClient != null) {
-      final clientServiceType = _nextClient!.serviceType?.trim() ?? '';
+    if (_activeClient != null) {
+      final clientServiceType = _activeClient!.serviceType?.trim() ?? '';
       // Check if service type is one of our known keys (case-insensitive)
       final isKnownLocation = _locations.keys
           .any((k) => k.toLowerCase() == clientServiceType.toLowerCase());
 
       if (!isKnownLocation) {
-        final coordinates = _nextClient!.locationCoordinates;
+        final coordinates = _activeClient!.locationCoordinates;
         if (coordinates != null && coordinates.length >= 2) {
           _markers.add(
             Marker(
               markerId: const MarkerId('patient_destination'),
               position: LatLng(coordinates[0], coordinates[1]),
               infoWindow: InfoWindow(
-                title: _nextClient!.fullName,
-                snippet: _nextClient!.fullAddress,
+                title: _activeClient!.fullName,
+                snippet: _activeClient!.fullAddress,
               ),
               icon: BitmapDescriptor.defaultMarkerWithHue(
                   BitmapDescriptor.hueGreen),
@@ -888,17 +900,17 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   }
 
   Future<void> _loadTasks() async {
-    if (_nextShift == null) {
-      debugPrint('❌ _loadTasks: _nextShift is null');
+    if (_activeShift == null) {
+      debugPrint('❌ _loadTasks: _activeShift is null');
       return;
     }
 
     debugPrint(
-        '🔍 _loadTasks: Fetching tasks for shift_id: ${_nextShift!.shiftId}');
+        '🔍 _loadTasks: Fetching tasks for shift_id: ${_activeShift!.shiftId}');
 
     setState(() {
       _loadingTasks = true;
-      _hasTaskChanges = false; // Reset changes flag when loading new tasks
+      _loadingTasks = true;
     });
 
     try {
@@ -906,18 +918,18 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
       var response = await supabase
           .from('tasks')
           .select('*')
-          .eq('shift_id', _nextShift!.shiftId)
+          .eq('shift_id', _activeShift!.shiftId)
           .order('task_id');
 
       debugPrint(
-          '📥 _loadTasks: Found ${response.length} tasks by shift_id=${_nextShift!.shiftId}');
+          '📥 _loadTasks: Found ${response.length} tasks by shift_id=${_activeShift!.shiftId}');
 
       // 2. Fallback: If no tasks found by shift_id, try linking via shift.task_id (Business ID)
-      if (response.isEmpty && _nextShift!.taskId != null) {
+      if (response.isEmpty && _activeShift!.taskId != null) {
         debugPrint(
-            '⚠️ No tasks by shift_id. Attempting fallback via shift.task_id (task_code): ${_nextShift!.taskId}');
+            '⚠️ No tasks by shift_id. Attempting fallback via shift.task_id (task_code): ${_activeShift!.taskId}');
 
-        final shiftTaskCode = _nextShift!.taskId!;
+        final shiftTaskCode = _activeShift!.taskId!;
 
         final fallbackResponse = await supabase
             .from('tasks')
@@ -959,7 +971,8 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
     }
   }
 
-  void _toggleTask(Task task, bool value) {
+  Future<void> _toggleTask(Task task, bool value) async {
+    // 1. Optimistic Update
     final index = _tasks.indexWhere((t) => t.taskId == task.taskId);
     if (index == -1) return;
 
@@ -973,50 +986,53 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
 
     setState(() {
       _tasks[index] = updatedTask;
-      _hasTaskChanges = true; // Mark that tasks have been modified
     });
+
+    // 2. Auto-Save to DB
+    try {
+      await supabase
+          .from('tasks')
+          .update({'status': value}).eq('task_id', task.taskId);
+      // debugPrint('✅ Task ${task.taskId} saved via Auto-Save');
+    } catch (e) {
+      debugPrint('❌ Error auto-saving task: $e');
+      _showSnackBar('Values did not save to server. Check connection.',
+          isError: true);
+      // Revert optimization? For now, we leave it and hope next sync fixes it.
+    }
   }
 
-  Future<void> _updateTasksAndComplete() async {
-    if (!_hasTaskChanges) return;
-
+  Future<void> _handleClockOut() async {
     setState(() {
       _updatingTasks = true;
     });
 
     try {
-      // Update all tasks in the database
-      for (final task in _tasks) {
-        await supabase
-            .from('tasks')
-            .update({'status': task.status}).eq('task_id', task.taskId);
+      // Validate again (redundant but safe)
+      if (!_tasks.every((t) => t.status)) {
+        _showSnackBar('Please complete all tasks first!', isError: true);
+        setState(() => _updatingTasks = false);
+        return;
       }
 
-      _showSnackBar('✅ Tasks updated successfully');
+      if (_currentPosition == null) {
+        _showSnackBar('Waiting for location...', isError: true);
+        setState(() => _updatingTasks = false);
+        return;
+      }
 
-      setState(() {
-        _hasTaskChanges = false;
-        _updatingTasks = false;
-      });
-
-      // Check if all tasks are complete for auto clock-out
-      if (_isClockedIn) {
-        final allDone = _tasks.every((t) => t.status);
-        if (allDone && _currentPosition != null) {
-          _showSnackBar('🎉 All tasks complete! Clocking out...');
-          // Delay to show the success message
-          await Future.delayed(const Duration(milliseconds: 1500));
-          if (mounted) {
-            await _autoClockOut(_currentPosition!);
-          }
-        }
+      _showSnackBar('✅ Tasks verified. Clocking out...');
+      // Delay to show the success message
+      await Future.delayed(const Duration(milliseconds: 1000));
+      if (mounted) {
+        await _autoClockOut(_currentPosition!);
       }
     } catch (e) {
       if (mounted) {
         setState(() {
           _updatingTasks = false;
         });
-        _showSnackBar('Error updating tasks: $e', isError: true);
+        _showSnackBar('Error clocking out: $e', isError: true);
       }
     }
   }
@@ -1085,9 +1101,9 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   }
 
   LatLng _getInitialCameraPosition() {
-    // If we have next client location, center there; otherwise average of locations
-    if (_nextClient != null) {
-      final coordinates = _nextClient!.locationCoordinates;
+    // If we have active client location, center there; otherwise average of locations
+    if (_activeClient != null) {
+      final coordinates = _activeClient!.locationCoordinates;
       if (coordinates != null && coordinates.length >= 2) {
         return LatLng(coordinates[0], coordinates[1]);
       }
@@ -1109,8 +1125,8 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   }
 
   Future<void> _moveCameraToClient() async {
-    if (_nextClient != null && _mapController != null) {
-      final coordinates = _nextClient!.locationCoordinates;
+    if (_activeClient != null && _mapController != null) {
+      final coordinates = _activeClient!.locationCoordinates;
       if (coordinates != null && coordinates.length >= 2) {
         await _mapController!.animateCamera(
           CameraUpdate.newLatLngZoom(
@@ -1125,9 +1141,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
   Future<Map<String, double>?> _fetchCoordinatesFromBackend(
       String address) async {
     try {
-      // Use 192.168.0.7 for Real Device (Your Local IP)
-      // Use 10.0.2.2 ONLY for Android Emulator
-      final uri = Uri.parse('http://192.168.0.7:3000/api/geocode');
+      final uri = Uri.parse(ApiConfig.geocodeUrl);
 
       debugPrint('🌍 Calling Geocode API: $uri for "$address"');
 
@@ -1176,7 +1190,7 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.blueAccent),
-            onPressed: _loadNextUpcomingShift,
+            onPressed: _loadActiveShift,
             tooltip: 'Refresh Shift',
           ),
         ],
@@ -1223,9 +1237,9 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (_nextClient != null &&
-                    _nextClient!.locationCoordinates != null &&
-                    _nextClient!.locationCoordinates!.length >= 2) ...[
+                if (_activeClient != null &&
+                    _activeClient!.locationCoordinates != null &&
+                    _activeClient!.locationCoordinates!.length >= 2) ...[
                   FloatingActionButton(
                     heroTag: 'client_loc_fab',
                     onPressed: _moveCameraToClient,
@@ -1290,373 +1304,503 @@ class _TimeTrackingPageState extends State<TimeTrackingPage> {
               ),
             ),
 
-          // 4. Bottom Control Panel
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Container(
-              width: double.infinity,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(30)),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.15),
-                    blurRadius: 20,
-                    offset: const Offset(0, -5),
-                  ),
-                ],
-              ),
-              child: SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.all(24.0),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      // Handle bar for visual affordance
-                      Center(
-                        child: Container(
-                          width: 40,
-                          height: 4,
-                          margin: const EdgeInsets.only(bottom: 20),
-                          decoration: BoxDecoration(
-                            color: Colors.grey.shade300,
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                      ),
-
-                      // Status Header
-                      Row(
+          // 4. Swipeable Bottom Sheet
+          DraggableScrollableSheet(
+            initialChildSize: 0.45,
+            minChildSize: 0.2, // Collapsed state (shows only header)
+            maxChildSize: 0.85, // Expanded state (covers most of map)
+            builder: (context, scrollController) {
+              return Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(30)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.15),
+                      blurRadius: 20,
+                      offset: const Offset(0, -5),
+                    ),
+                  ],
+                ),
+                child: SingleChildScrollView(
+                  controller: scrollController,
+                  child: SafeArea(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24.0),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          Container(
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: _isClockedIn
-                                  ? Colors.green.withValues(alpha: 0.1)
-                                  : Colors.orange.withValues(alpha: 0.1),
-                              shape: BoxShape.circle,
-                            ),
-                            child: Icon(
-                              _isClockedIn
-                                  ? Icons.check_circle_rounded
-                                  : Icons.timer_outlined,
-                              color:
-                                  _isClockedIn ? Colors.green : Colors.orange,
-                              size: 24,
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  _isClockedIn
-                                      ? 'Currently Working'
-                                      : 'Ready to Start',
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.grey.shade600,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  _isClockedIn ? 'Clocked In' : 'Clocked Out',
-                                  style: const TextStyle(
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.black87,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (_isClockedIn && _clockInTimeUtc != null)
-                            _LiveTimer(startTime: _clockInTimeUtc!),
-                        ],
-                      ),
-
-                      const SizedBox(height: 24),
-
-                      // Next Shift Info Card
-                      if (_loadingNextShift)
-                        const Padding(
-                          padding: EdgeInsets.all(20.0),
-                          child: Center(child: CircularProgressIndicator()),
-                        )
-                      else if (_nextShift != null && _nextClient != null)
-                        Column(
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(16),
+                          // Handle bar for visual affordance
+                          Center(
+                            child: Container(
+                              width: 40,
+                              height: 4,
+                              margin: const EdgeInsets.only(bottom: 20),
                               decoration: BoxDecoration(
-                                color: Colors.blue.withValues(alpha: 0.05),
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(
-                                    color: Colors.blue.withValues(alpha: 0.1)),
-                              ),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(8),
-                                    decoration: BoxDecoration(
-                                      color: Colors.white,
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    child: const Icon(
-                                        Icons.person_outline_rounded,
-                                        color: Colors.blue),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          _nextClient!.fullName,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 15,
-                                          ),
-                                        ),
-                                        if (_nextClient!.serviceType != null &&
-                                            _nextClient!
-                                                .serviceType!.isNotEmpty)
-                                          Padding(
-                                            padding:
-                                                const EdgeInsets.only(top: 2),
-                                            child: Text(
-                                              _nextClient!.serviceType!,
-                                              style: TextStyle(
-                                                color: Colors.blue.shade700,
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                          ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          '${_nextShift!.date} • ${_nextShift!.formattedTimeRange}',
-                                          style: TextStyle(
-                                            color: Colors.grey.shade600,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                        if (_nextClient!
-                                            .fullAddress.isNotEmpty) ...[
-                                          const SizedBox(height: 4),
-                                          Row(
-                                            children: [
-                                              Icon(Icons.location_on_outlined,
-                                                  size: 14,
-                                                  color: Colors.grey.shade500),
-                                              const SizedBox(width: 4),
-                                              Expanded(
-                                                child: Text(
-                                                  _nextClient!.fullAddress,
-                                                  style: TextStyle(
-                                                    color: Colors.grey.shade500,
-                                                    fontSize: 11,
-                                                  ),
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ],
-                                        if (_currentPosition != null &&
-                                            _nextClient!.locationCoordinates !=
-                                                null) ...[
-                                          const SizedBox(height: 4),
-                                          Row(
-                                            children: [
-                                              Icon(Icons.directions_walk,
-                                                  size: 14,
-                                                  color: Colors.blue.shade400),
-                                              const SizedBox(width: 4),
-                                              Text(
-                                                '${(_calculateDistance(
-                                                      _currentPosition!
-                                                          .latitude,
-                                                      _currentPosition!
-                                                          .longitude,
-                                                      _nextClient!
-                                                          .locationCoordinates![0],
-                                                      _nextClient!
-                                                          .locationCoordinates![1],
-                                                    ) / 1000).toStringAsFixed(2)} km away',
-                                                style: TextStyle(
-                                                  color: Colors.blue.shade600,
-                                                  fontSize: 11,
-                                                  fontWeight: FontWeight.w500,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ],
-                                      ],
-                                    ),
-                                  ),
-                                ],
+                                color: Colors.grey.shade300,
+                                borderRadius: BorderRadius.circular(2),
                               ),
                             ),
-                            if (_isClockedIn) ...[
-                              const SizedBox(height: 20),
-                              const Align(
-                                alignment: Alignment.centerLeft,
-                                child: Text(
-                                  'Shift Tasks',
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                  ),
+                          ),
+
+                          // Status Header
+                          Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: _isClockedIn
+                                      ? Colors.green.withValues(alpha: 0.1)
+                                      : Colors.orange.withValues(alpha: 0.1),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Icon(
+                                  _isClockedIn
+                                      ? Icons.check_circle_rounded
+                                      : Icons.timer_outlined,
+                                  color: _isClockedIn
+                                      ? Colors.green
+                                      : Colors.orange,
+                                  size: 24,
                                 ),
                               ),
-                              const SizedBox(height: 8),
-                              if (_loadingTasks)
-                                const Center(
-                                    child: Padding(
-                                  padding: EdgeInsets.all(16),
-                                  child: CircularProgressIndicator(),
-                                ))
-                              else if (_tasks.isEmpty)
+                              const SizedBox(width: 16),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      _isClockedIn
+                                          ? 'Currently Working'
+                                          : 'Ready to Start',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        color: Colors.grey.shade600,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      _isClockedIn
+                                          ? 'Clocked In'
+                                          : 'Clocked Out',
+                                      style: const TextStyle(
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.black87,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (_isClockedIn && _clockInTimeUtc != null)
+                                _LiveTimer(startTime: _clockInTimeUtc!),
+                            ],
+                          ),
+
+                          const SizedBox(height: 24),
+
+                          // Active Shift Info Card
+                          if (_loadingActiveShift)
+                            const Padding(
+                              padding: EdgeInsets.all(20.0),
+                              child: Center(child: CircularProgressIndicator()),
+                            )
+                          else if (_activeShift != null &&
+                              _activeClient != null)
+                            Column(
+                              children: [
                                 Container(
                                   padding: const EdgeInsets.all(16),
-                                  width: double.infinity,
                                   decoration: BoxDecoration(
-                                    color: Colors.grey.shade50,
-                                    borderRadius: BorderRadius.circular(12),
+                                    color: Colors.blue.withValues(alpha: 0.05),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                        color:
+                                            Colors.blue.withValues(alpha: 0.1)),
                                   ),
-                                  child: Text(
-                                    'No tasks assigned for this shift.',
-                                    style:
-                                        TextStyle(color: Colors.grey.shade600),
-                                    textAlign: TextAlign.center,
-                                  ),
-                                )
-                              else
-                                ListView.builder(
-                                  shrinkWrap: true,
-                                  physics: const NeverScrollableScrollPhysics(),
-                                  itemCount: _tasks.length,
-                                  itemBuilder: (context, index) {
-                                    final task = _tasks[index];
-                                    return CheckboxListTile(
-                                      value: task.status,
-                                      onChanged: (val) =>
-                                          _toggleTask(task, val ?? false),
-                                      title: Text(
-                                        task.details ?? 'Task ${index + 1}',
-                                        style: TextStyle(
-                                          decoration: task.status
-                                              ? TextDecoration.lineThrough
-                                              : null,
-                                          color: task.status
-                                              ? Colors.grey
-                                              : Colors.black87,
-                                        ),
-                                      ),
-                                      controlAffinity:
-                                          ListTileControlAffinity.leading,
-                                      contentPadding: EdgeInsets.zero,
-                                      activeColor: Colors.blue,
-                                    );
-                                  },
-                                ),
-                            ],
-                          ],
-                        ),
-
-                      const SizedBox(height: 24),
-
-                      // Update Tasks Button (only shows when clocked in)
-                      if (_isClockedIn)
-                        SizedBox(
-                          height: 56,
-                          child: ElevatedButton(
-                            onPressed: (_hasTaskChanges && !_updatingTasks)
-                                ? _updateTasksAndComplete
-                                : null,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: _hasTaskChanges
-                                  ? Colors.blue
-                                  : Colors.grey.shade300,
-                              foregroundColor: Colors.white,
-                              elevation: 0,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                              disabledBackgroundColor: Colors.grey.shade300,
-                              disabledForegroundColor: Colors.grey.shade500,
-                            ),
-                            child: _updatingTasks
-                                ? const Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
-                                      SizedBox(
-                                        width: 20,
-                                        height: 20,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
+                                      Container(
+                                        padding: const EdgeInsets.all(8),
+                                        decoration: BoxDecoration(
                                           color: Colors.white,
+                                          borderRadius:
+                                              BorderRadius.circular(10),
+                                        ),
+                                        child: const Icon(
+                                            Icons.person_outline_rounded,
+                                            color: Colors.blue),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              _activeClient!.fullName,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 15,
+                                              ),
+                                            ),
+                                            if (_activeClient!.serviceType !=
+                                                    null &&
+                                                _activeClient!
+                                                    .serviceType!.isNotEmpty)
+                                              Padding(
+                                                padding: const EdgeInsets.only(
+                                                    top: 2),
+                                                child: Text(
+                                                  _activeClient!.serviceType!,
+                                                  style: TextStyle(
+                                                    color: Colors.blue.shade700,
+                                                    fontSize: 13,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                              ),
+                                            // Get Directions Button
+                                            Padding(
+                                              padding:
+                                                  const EdgeInsets.only(top: 4),
+                                              child: InkWell(
+                                                onTap: _launchExternalMaps,
+                                                child: Row(
+                                                  mainAxisSize:
+                                                      MainAxisSize.min,
+                                                  children: [
+                                                    Icon(
+                                                      Icons.directions,
+                                                      size: 16,
+                                                      color:
+                                                          Colors.blue.shade700,
+                                                    ),
+                                                    const SizedBox(width: 4),
+                                                    Text(
+                                                      'Get Directions',
+                                                      style: TextStyle(
+                                                        color: Colors
+                                                            .blue.shade700,
+                                                        fontSize: 12,
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                        decoration:
+                                                            TextDecoration
+                                                                .underline,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              '${_activeShift!.date} • ${_activeShift!.formattedTimeRange}',
+                                              style: TextStyle(
+                                                color: Colors.grey.shade600,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                            if (_activeClient!
+                                                .fullAddress.isNotEmpty) ...[
+                                              const SizedBox(height: 4),
+                                              Row(
+                                                children: [
+                                                  Icon(
+                                                      Icons
+                                                          .location_on_outlined,
+                                                      size: 14,
+                                                      color:
+                                                          Colors.grey.shade500),
+                                                  const SizedBox(width: 4),
+                                                  Expanded(
+                                                    child: Text(
+                                                      _activeClient!
+                                                          .fullAddress,
+                                                      style: TextStyle(
+                                                        color: Colors
+                                                            .grey.shade500,
+                                                        fontSize: 11,
+                                                      ),
+                                                      maxLines: 1,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ],
+                                            if (_currentPosition != null &&
+                                                _activeClient!
+                                                        .locationCoordinates !=
+                                                    null) ...[
+                                              const SizedBox(height: 4),
+                                              Row(
+                                                children: [
+                                                  Icon(
+                                                      Icons
+                                                          .directions_car, // Changed to car
+                                                      size: 14,
+                                                      color:
+                                                          Colors.blue.shade400),
+                                                  const SizedBox(width: 4),
+                                                  Text(
+                                                    _routeDistance != null &&
+                                                            _routeDuration !=
+                                                                null
+                                                        ? '$_routeDistance • $_routeDuration'
+                                                        : '${(_calculateDistance(
+                                                              _currentPosition!
+                                                                  .latitude,
+                                                              _currentPosition!
+                                                                  .longitude,
+                                                              _activeClient!
+                                                                  .locationCoordinates![0],
+                                                              _activeClient!
+                                                                  .locationCoordinates![1],
+                                                            ) / 1000).toStringAsFixed(2)} km away',
+                                                    style: TextStyle(
+                                                      color:
+                                                          Colors.blue.shade600,
+                                                      fontSize: 11,
+                                                      fontWeight:
+                                                          FontWeight.w500,
+                                                    ),
+                                                  ),
+                                                  if (_routeDistance == null)
+                                                    Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                              left: 8.0),
+                                                      child: GestureDetector(
+                                                        onTap: () {
+                                                          _updateRouteToClient();
+                                                          _moveCameraToClient(); // Or bounds
+                                                        },
+                                                        child: const Text(
+                                                          'Show Route',
+                                                          style: TextStyle(
+                                                              color:
+                                                                  Colors.blue,
+                                                              fontWeight:
+                                                                  FontWeight
+                                                                      .bold,
+                                                              fontSize: 11,
+                                                              decoration:
+                                                                  TextDecoration
+                                                                      .underline),
+                                                        ),
+                                                      ),
+                                                    ),
+                                                ],
+                                              ),
+                                            ],
+                                          ],
                                         ),
                                       ),
-                                      SizedBox(width: 12),
-                                      Text(
-                                        'Updating...',
+                                      const SizedBox(width: 8),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: Colors.grey
+                                              .withValues(alpha: 0.15),
+                                          borderRadius:
+                                              BorderRadius.circular(6),
+                                        ),
+                                        child: Text(
+                                          '#${_activeShift!.shiftId}',
+                                          style: TextStyle(
+                                            color: Colors.grey.shade700,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                                // Inline Tasks Section (Visible Always)
+                                const Divider(height: 32),
+                                const Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Text(
+                                    'Shift Tasks',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                if (_loadingTasks)
+                                  const Center(
+                                      child: Padding(
+                                    padding: EdgeInsets.all(16),
+                                    child: CircularProgressIndicator(),
+                                  ))
+                                else if (_tasks.isEmpty)
+                                  Container(
+                                    padding: const EdgeInsets.all(16),
+                                    width: double.infinity,
+                                    decoration: BoxDecoration(
+                                      color: Colors.grey.shade50,
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Text(
+                                      'No tasks assigned for this shift.',
+                                      style: TextStyle(
+                                          color: Colors.grey.shade600),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  )
+                                else
+                                  ListView.builder(
+                                    shrinkWrap: true,
+                                    physics:
+                                        const NeverScrollableScrollPhysics(),
+                                    itemCount: _tasks.length,
+                                    itemBuilder: (context, index) {
+                                      final task = _tasks[index];
+                                      return CheckboxListTile(
+                                        // Enabled only when clocked in
+                                        enabled: _isClockedIn,
+                                        value: task.status,
+                                        onChanged: (val) =>
+                                            _toggleTask(task, val ?? false),
+                                        title: Text(
+                                          task.details ?? 'Task ${index + 1}',
+                                          style: TextStyle(
+                                            decoration: task.status
+                                                ? TextDecoration.lineThrough
+                                                : null,
+                                            fontSize: 14,
+                                            color: task.status
+                                                ? Colors.grey
+                                                : Colors.black87,
+                                          ),
+                                        ),
+                                        controlAffinity:
+                                            ListTileControlAffinity.leading,
+                                        contentPadding: EdgeInsets.zero,
+                                        activeColor: Colors.blue,
+                                      );
+                                    },
+                                  ),
+                              ],
+                            ),
+
+                          // Clock Out Button (only shows when clocked in)
+                          if (_isClockedIn)
+                            SizedBox(
+                              height: 56,
+                              child: ElevatedButton(
+                                onPressed: (_tasks.isNotEmpty &&
+                                        _tasks.every((t) => t.status) &&
+                                        _currentPosition != null &&
+                                        _activeClient?.locationCoordinates !=
+                                            null &&
+                                        _calculateDistance(
+                                                _currentPosition!.latitude,
+                                                _currentPosition!.longitude,
+                                                _activeClient!
+                                                    .locationCoordinates![0],
+                                                _activeClient!
+                                                    .locationCoordinates![1]) <
+                                            (_geofenceRadius +
+                                                200) // Relaxed check
+                                        &&
+                                        !_updatingTasks)
+                                    ? _handleClockOut
+                                    : null,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor:
+                                      Colors.redAccent, // Distinct color
+                                  foregroundColor: Colors.white,
+                                  elevation: 2,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(16),
+                                  ),
+                                  disabledBackgroundColor: Colors.grey.shade300,
+                                  disabledForegroundColor: Colors.grey.shade500,
+                                ),
+                                child: _updatingTasks
+                                    ? const Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
+                                          SizedBox(
+                                            width: 20,
+                                            height: 20,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                          SizedBox(width: 12),
+                                          Text(
+                                            'Processing...',
+                                            style: TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ],
+                                      )
+                                    : const Text(
+                                        'Clock Out',
                                         style: TextStyle(
                                           fontSize: 16,
                                           fontWeight: FontWeight.bold,
                                         ),
                                       ),
-                                    ],
-                                  )
-                                : Text(
-                                    _hasTaskChanges
-                                        ? 'Update Tasks & Complete'
-                                        : 'No Changes',
-                                    style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                          ),
-                        ),
-                      if (_isClockedIn && _hasTaskChanges)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 12),
-                          child: Text(
-                            'Tap to save changes. Auto clock-out if all tasks done.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey.shade500,
+                              ),
                             ),
-                          ),
-                        ),
-                      if (!_isClockedIn)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 12),
-                          child: Text(
-                            'Enter the client\'s location to automatically clock in.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey.shade500,
+                          if (_isClockedIn)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 12),
+                              child: Text(
+                                _tasks.every((t) => t.status)
+                                    ? 'All tasks complete. You are ready to clock out.'
+                                    : 'Complete all tasks to enable Clock Out.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: _tasks.every((t) => t.status)
+                                      ? Colors.green
+                                      : Colors.orange,
+                                  fontWeight: _tasks.every((t) => t.status)
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                ),
+                              ),
                             ),
-                          ),
-                        ),
-                    ],
+                          if (!_isClockedIn)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 12),
+                              child: Text(
+                                'Enter the client\'s location to automatically clock in.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade500,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         ],
       ),

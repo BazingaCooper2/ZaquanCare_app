@@ -22,6 +22,7 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
   List<ShiftOfferRecord> _pendingOffers = [];
   List<ShiftOfferRecord> _acceptedOffers = [];
   List<ShiftOfferRecord> _rejectedOffers = [];
+  List<ShiftOfferRecord> _todayOffers = [];
 
   Map<String, int> _counts = {
     'total': 0,
@@ -29,6 +30,7 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
     'accepted': 0,
     'rejected': 0,
     'expired': 0,
+    'today': 0,
   };
 
   double _acceptanceRate = 0.0;
@@ -37,7 +39,7 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
     _loadOffers();
   }
 
@@ -73,6 +75,16 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
       final rate =
           await ShiftOffersService.getAcceptanceRate(widget.employee.empId);
 
+      final now = DateTime.now();
+      final todayOffers = all.where((o) {
+        if (o.sentAt == null) return false;
+        return o.sentAt!.year == now.year &&
+            o.sentAt!.month == now.month &&
+            o.sentAt!.day == now.day;
+      }).toList();
+
+      counts['today'] = todayOffers.length;
+
       if (!mounted) return;
 
       setState(() {
@@ -80,6 +92,7 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
         _pendingOffers = pending;
         _acceptedOffers = accepted;
         _rejectedOffers = rejected;
+        _todayOffers = todayOffers;
         _counts = counts;
         _acceptanceRate = rate;
         _isLoading = false;
@@ -141,6 +154,10 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
               text: 'Rejected (${_counts['rejected']})',
               icon: const Icon(Icons.cancel_outlined),
             ),
+            Tab(
+              text: 'Today (${_counts['today']})',
+              icon: const Icon(Icons.today),
+            ),
           ],
         ),
         actions: [
@@ -172,6 +189,8 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
                       _buildOffersList(_pendingOffers, 'No pending offers'),
                       _buildOffersList(_acceptedOffers, 'No accepted offers'),
                       _buildOffersList(_rejectedOffers, 'No rejected offers'),
+                      _buildOffersList(
+                          _todayOffers, 'No offers received today'),
                     ],
                   ),
           ),

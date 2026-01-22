@@ -17,6 +17,9 @@ app.use(express.json()); // Parse JSON request bodies
 // Mounts the geocode routes at /api/geocode
 app.use('/api', geocodeRoutes);
 
+const directionsRoutes = require('./routes/directionsRoutes');
+app.use('/api', directionsRoutes);
+
 // Health Check Endpoint
 app.get('/health', (req, res) => {
     res.json({

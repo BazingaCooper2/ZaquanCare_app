@@ -18,6 +18,7 @@ class _ShiftPageState extends State<ShiftPage> {
   List<Shift> _allShifts = [];
   List<Shift> _filteredShifts = [];
   bool _isLoading = true;
+  int? _activeShiftId; // Stores the ID of the RPC-determined active shift
 
   // Date filter state
   String _selectedDateFilter =
@@ -52,8 +53,27 @@ class _ShiftPageState extends State<ShiftPage> {
       debugPrint('📊 Total rows in SHIFT table = ${countResponse['count']}');
 
       // Fetch shifts for emp_id
-      debugPrint('📡 Running query: SELECT * FROM shift WHERE emp_id = $empId');
+      debugPrint(
+          '📡 Running query: SELECT * FROM shift WHERE emp_id = $empId ORDER BY date, shift_start_time');
 
+      // 1. Fetch Active Shift ID via RPC (Single Source of Truth)
+      try {
+        final activeShiftResponse =
+            await supabase.rpc('get_active_shift', params: {'p_emp_id': empId});
+        debugPrint('🔥 RPC Active Shift Response: $activeShiftResponse');
+
+        if (activeShiftResponse != null) {
+          if (activeShiftResponse is List && activeShiftResponse.isNotEmpty) {
+            _activeShiftId = activeShiftResponse[0]['shift_id'];
+          } else if (activeShiftResponse is Map) {
+            _activeShiftId = activeShiftResponse['shift_id'];
+          }
+        }
+      } catch (e) {
+        debugPrint('⚠️ Error fetching active shift RPC in ShiftPage: $e');
+      }
+
+      // 2. Fetch All Shifts
       final response = await supabase
           .from('shift')
           .select()
@@ -199,8 +219,25 @@ class _ShiftPageState extends State<ShiftPage> {
         }
       }).toList();
     } else if (_selectedDateFilter == 'Next Scheduled') {
-      // Show only upcoming shifts
-      filtered = filtered.where((shift) {
+      List<Shift> nextShifts = [];
+      Shift? activeShift;
+
+      // 1. Find and separate Active Shift (RPC Authority)
+      if (_activeShiftId != null) {
+        try {
+          activeShift =
+              _allShifts.firstWhere((s) => s.shiftId == _activeShiftId);
+        } catch (_) {
+          // Active shift might not be in the loaded list if pagination was used,
+          // but here we load all, so it should be there.
+        }
+      }
+
+      // 2. Filter the rest (Standard Future Logic)
+      nextShifts = _allShifts.where((shift) {
+        // Exclude the active shift as we add it explicitly at the top
+        if (shift.shiftId == _activeShiftId) return false;
+
         if (shift.date == null) return false;
         try {
           final shiftDate = DateTime.parse(shift.date!);
@@ -220,7 +257,7 @@ class _ShiftPageState extends State<ShiftPage> {
       }).toList();
 
       // Sort by date and time (earliest first)
-      filtered.sort((a, b) {
+      nextShifts.sort((a, b) {
         try {
           final dateA = DateTime.parse(a.date ?? '');
           final dateB = DateTime.parse(b.date ?? '');
@@ -236,6 +273,9 @@ class _ShiftPageState extends State<ShiftPage> {
           return 0;
         }
       });
+
+      // 3. Combine: Active Shift (Top) + Remaining Future Shifts
+      filtered = [if (activeShift != null) activeShift, ...nextShifts];
     }
 
     if (_selectedStatuses.isNotEmpty) {
@@ -464,7 +504,30 @@ class _ShiftPageState extends State<ShiftPage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _buildStatusTag(statusText, statusColor),
+                        Row(
+                          children: [
+                            _buildStatusTag(statusText, statusColor),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.grey.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(
+                                    color: Colors.grey.withValues(alpha: 0.2)),
+                              ),
+                              child: Text(
+                                '#${shift.shiftId}',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.grey.shade600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                         const SizedBox(height: 12),
                         _buildInfoRow('🗓', date, theme),
                         const SizedBox(height: 8),
