@@ -4,8 +4,8 @@ import java.io.FileInputStream
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    id("dev.flutter.flutter-gradle-plugin") // Flutter Gradle Plugin must be applied last
-    id("com.google.gms.google-services")    // Apply Firebase plugin
+    id("dev.flutter.flutter-gradle-plugin")
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -13,7 +13,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.nursetracker.app" // Must match google-services.json
+        applicationId = "com.nursetracker.app"
         minSdk = flutter.minSdkVersion
         targetSdk = 36
         versionCode = 1
@@ -34,13 +34,17 @@ android {
         create("release") {
             val keystoreProperties = Properties()
             val keystoreFile = rootProject.file("key.properties")
-            if (keystoreFile.exists()) {
-                keystoreProperties.load(FileInputStream(keystoreFile))
-                storeFile = file(keystoreProperties["storeFile"] as String)
-                storePassword = keystoreProperties["storePassword"] as String
-                keyAlias = keystoreProperties["keyAlias"] as String
-                keyPassword = keystoreProperties["keyPassword"] as String
+
+            if (!keystoreFile.exists()) {
+                throw GradleException("key.properties not found. Release build cannot be signed.")
             }
+
+            keystoreProperties.load(FileInputStream(keystoreFile))
+
+            storeFile = file(keystoreProperties["storeFile"] as String)
+            storePassword = keystoreProperties["storePassword"] as String
+            keyAlias = keystoreProperties["keyAlias"] as String
+            keyPassword = keystoreProperties["keyPassword"] as String
         }
     }
 
@@ -49,11 +53,13 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
+
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
+
         debug {
             isMinifyEnabled = false
             isShrinkResources = false

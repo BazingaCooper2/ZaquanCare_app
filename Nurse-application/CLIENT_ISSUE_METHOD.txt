@@ -1,0 +1,140 @@
+// ADD THIS METHOD TO chatbot_modal.dart BEFORE THE @override build() METHOD (around line 1036)
+
+  Future<void> _showClientIssueConfirmationDialog(String issueType) async {
+    setState(() => _isLoading = true);
+    final shiftMap = await _fetchCurrentShift();
+    setState(() => _isLoading = false);
+
+    if (shiftMap == null) {
+      if (mounted) {
+        _sendMessage(issueType);
+      }
+      return;
+    }
+
+    final shiftObj = Shift.fromJson(shiftMap);
+    if (!mounted) return;
+
+    final signatureController = SignatureController(
+      penStrokeWidth: 3,
+      penColor: Colors.black,
+      exportBackgroundColor: Colors.white,
+    );
+    bool isSubmitting = false;
+
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(issueType),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.red.shade100),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Client: ${shiftObj.clientName ?? "N/A"}',
+                            style: const TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Text('Time: ${shiftObj.formattedTimeRange}'),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            const Text('Status: ', style: TextStyle(fontWeight: FontWeight.w500)),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: _getStatusColor(shiftObj.shiftStatus),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                _formatStatus(shiftObj.shiftStatus),
+                                style: const TextStyle(color: Colors.white, fontSize: 12),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text('Reporting "$issueType". Please sign below to confirm.'),
+                  const SizedBox(height: 8),
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade300),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Signature(
+                      controller: signatureController,
+                      height: 150,
+                      backgroundColor: Colors.white,
+                    ),
+                  ),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: () => signatureController.clear(),
+                      child: const Text('Clear Signature'),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  if (isSubmitting)
+                    const Center(child: CircularProgressIndicator())
+                  else
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: () async {
+                        if (signatureController.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Please sign to confirm.')),
+                          );
+                          return;
+                        }
+
+                        final signature = await signatureController.toPngBytes();
+                        if (signature == null) return;
+
+                        String requestTypeCode = 'other';
+                        if (issueType == 'Client not home') requestTypeCode = 'client_not_home';
+                        if (issueType == 'Client cancelled') requestTypeCode = 'client_cancelled';
+
+                        if (context.mounted) {
+                          Navigator.of(context).pop();
+                          
+                          await _submitShiftChangeRequest(
+                            requestType: requestTypeCode,
+                            shift: shiftObj,
+                            reason: issueType,
+                            signatureImage: signature,
+                            newShiftStatus: 'cancelled',
+                            setLoading: (loading) {
+                              if (mounted) setState(() => _isLoading = loading);
+                            },
+                          );
+                        }
+                      },
+                      child: Text('Confirm $issueType'),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }

@@ -6,6 +6,7 @@ import '../models/employee.dart';
 import '../models/shift.dart';
 import '../models/daily_shift.dart';
 import 'package:nurse_tracking_app/services/session.dart';
+import '../widgets/custom_loading_screen.dart';
 
 class ReportsPage extends StatefulWidget {
   final Employee employee;
@@ -172,7 +173,10 @@ class _ReportsPageState extends State<ReportsPage> {
         backgroundColor: Colors.transparent,
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const CustomLoadingScreen(
+              message: 'Loading reports...',
+              isOverlay: true,
+            )
           : SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(

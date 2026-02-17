@@ -15,6 +15,7 @@ import 'unified_reports_form.dart'; // ✅ Import unified reports form
 import '../widgets/chatbot_button.dart';
 import '../services/shift_offer_helper.dart';
 import 'shift_offers_page.dart';
+import '../widgets/custom_loading_screen.dart';
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -114,8 +115,8 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
+      return const CustomLoadingScreen(
+        message: 'Loading dashboard...',
       );
     }
 

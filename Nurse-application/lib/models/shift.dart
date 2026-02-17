@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'patient.dart';
 
 class Shift {
@@ -169,30 +170,44 @@ class Shift {
     }
   }
 
+  // Helper method to parse various time formats
+  static DateTime? _parseTimeAny(String? input) {
+    if (input == null || input.isEmpty) return null;
+    try {
+      // 1. Try ISO8601 (e.g., "2026-01-22T14:45:00")
+      return DateTime.parse(input);
+    } catch (_) {
+      // 2. Try HH:mm:ss or HH:mm (e.g., "14:45:00")
+      try {
+        final parts = input.split(':');
+        if (parts.length >= 2) {
+          final now = DateTime.now();
+          return DateTime(
+            now.year,
+            now.month,
+            now.day,
+            int.parse(parts[0]),
+            int.parse(parts[1]),
+          );
+        }
+      } catch (e) {
+        debugPrint('Err parsing time: $input');
+      }
+    }
+    return null;
+  }
+
   // Helper method to calculate duration in hours
   double? get durationHours {
-    if (shiftStartTime == null || shiftEndTime == null) return null;
+    final start = _parseTimeAny(shiftStartTime);
+    final end = _parseTimeAny(shiftEndTime);
 
-    try {
-      final startParts = shiftStartTime!.split(':');
-      final endParts = shiftEndTime!.split(':');
-      if (startParts.length < 2 || endParts.length < 2) {
-        return null;
-      }
+    if (start == null || end == null) return null;
 
-      final startHour = int.parse(startParts[0]);
-      final startMinute = int.parse(startParts[1]);
-      final endHour = int.parse(endParts[0]);
-      final endMinute = int.parse(endParts[1]);
-
-      final startMinutes = startHour * 60 + startMinute;
-      final endMinutes = endHour * 60 + endMinute;
-
-      final durationMinutes = endMinutes - startMinutes;
-      return durationMinutes / 60.0;
-    } catch (_) {
-      return null;
-    }
+    // If end is before start in time-only mode, mostly doesn't happen with full dates.
+    // If it does (night shift), logic needs to handle date crossing, but usually full ISO handles it.
+    final diff = end.difference(start);
+    return diff.inMinutes / 60.0;
   }
 
   // Helper method to calculate overtime hours
@@ -202,28 +217,18 @@ class Shift {
     return duration > 8 ? duration - 8 : 0;
   }
 
-  // Helper method to convert 24hr time to 12hr AM/PM format
-  static String formatTime12Hour(String? time24) {
-    if (time24 == null || time24.isEmpty) return '';
+  // Helper method to convert 24hr time OR ISO time to 12hr AM/PM format
+  static String formatTime12Hour(String? timeInput) {
+    if (timeInput == null || timeInput.isEmpty) return '';
 
     try {
-      final parts = time24.split(':');
-      if (parts.length < 2) return time24;
-
-      int hour = int.parse(parts[0]);
-      final minute = parts[1];
-
-      final period = hour >= 12 ? 'PM' : 'AM';
-
-      if (hour == 0) {
-        hour = 12; // Midnight
-      } else if (hour > 12) {
-        hour = hour - 12;
+      final dateTime = _parseTimeAny(timeInput);
+      if (dateTime != null) {
+        return DateFormat('h:mm a').format(dateTime); // e.g. 2:45 PM
       }
-
-      return '$hour:$minute $period';
+      return timeInput;
     } catch (_) {
-      return time24;
+      return timeInput;
     }
   }
 

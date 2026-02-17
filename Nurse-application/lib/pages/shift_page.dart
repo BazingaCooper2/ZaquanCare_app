@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import '../main.dart';
 import '../models/employee.dart';
 import '../models/shift.dart';
 import 'package:nurse_tracking_app/services/session.dart';
 import '../widgets/tasks_dialog.dart';
+import '../widgets/custom_loading_screen.dart';
 
 class ShiftPage extends StatefulWidget {
   final Employee employee;
@@ -276,6 +278,20 @@ class _ShiftPageState extends State<ShiftPage> {
 
       // 3. Combine: Active Shift (Top) + Remaining Future Shifts
       filtered = [if (activeShift != null) activeShift, ...nextShifts];
+    } else if (_selectedDateFilter == 'Completed') {
+      filtered = filtered.where((shift) {
+        final status = shift.shiftStatus?.toLowerCase().replaceAll(' ', '_');
+        return status == 'completed' ||
+            status == 'ended_early' ||
+            status == 'cancelled';
+      }).toList();
+
+      // Sort: Completed shifts usually sorted by newest first
+      filtered.sort((a, b) {
+        final dateA = DateTime.tryParse(a.date ?? '') ?? DateTime(0);
+        final dateB = DateTime.tryParse(b.date ?? '') ?? DateTime(0);
+        return dateB.compareTo(dateA); // Descending
+      });
     }
 
     if (_selectedStatuses.isNotEmpty) {
@@ -322,7 +338,10 @@ class _ShiftPageState extends State<ShiftPage> {
       body: RefreshIndicator(
         onRefresh: _loadShifts,
         child: _isLoading
-            ? const Center(child: CircularProgressIndicator())
+            ? const CustomLoadingScreen(
+                message: 'Loading shifts...',
+                isOverlay: true,
+              )
             : Column(
                 children: [
                   // DATE FILTER
@@ -348,6 +367,9 @@ class _ShiftPageState extends State<ShiftPage> {
                           _buildDateFilterChip('Today', theme),
                           const SizedBox(width: 8),
                           _buildDateFilterChip('This Week', theme),
+                          const SizedBox(width: 8),
+                          _buildDateFilterChip(
+                              'Completed', theme), // Added Completed Preset
                           const SizedBox(width: 8),
                           _buildDateFilterChip('All', theme),
                         ],
@@ -470,7 +492,28 @@ class _ShiftPageState extends State<ShiftPage> {
   }
 
   Widget _buildShiftCard(Shift shift, ThemeData theme) {
-    final date = shift.date ?? 'No date';
+    // Format Date nicely
+    String formattedDate = 'No date';
+    if (shift.date != null) {
+      try {
+        final parsed = DateTime.parse(shift.date!);
+        final now = DateTime.now();
+        final today = DateTime(now.year, now.month, now.day);
+        final tomorrow = today.add(const Duration(days: 1));
+        final shiftDate = DateTime(parsed.year, parsed.month, parsed.day);
+
+        if (shiftDate == today) {
+          formattedDate = 'Today, ${DateFormat('MMM d').format(parsed)}';
+        } else if (shiftDate == tomorrow) {
+          formattedDate = 'Tomorrow, ${DateFormat('MMM d').format(parsed)}';
+        } else {
+          formattedDate = DateFormat('EEEE, MMM d, yyyy').format(parsed);
+        }
+      } catch (_) {
+        formattedDate = shift.date!;
+      }
+    }
+
     final timeRange = shift.formattedTimeRange; // Use 12-hour format
     final statusColor = shift.statusColor;
     final statusText = shift.statusDisplayText;
@@ -529,74 +572,124 @@ class _ShiftPageState extends State<ShiftPage> {
                           ],
                         ),
                         const SizedBox(height: 12),
-                        _buildInfoRow('🗓', date, theme),
-                        const SizedBox(height: 8),
-                        _buildInfoRow('⏰', timeRange, theme),
-                        // Client Name
-                        if (shift.clientName != null &&
-                            shift.clientName!.isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          _buildInfoRow('👤', shift.clientName!, theme),
-                        ],
-                        // Client Location
-                        if (shift.clientLocation != null &&
-                            shift.clientLocation!.isNotEmpty) ...[
-                          _buildInfoRow('📍', shift.clientLocation!, theme),
-                        ],
-                        // Service Type (from Client)
-                        if (shift.clientServiceType != null &&
-                            shift.clientServiceType!.isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          _buildInfoRow('💼', shift.clientServiceType!, theme),
-                        ],
+
+                        // IMPROVED DATE & TIME DISPLAY
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.surfaceContainerHighest
+                                .withOpacity(0.3),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                                color: theme.colorScheme.outlineVariant
+                                    .withOpacity(0.5)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(Icons.calendar_today_rounded,
+                                      size: 16,
+                                      color: theme.colorScheme.primary),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      formattedDate,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 14,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              Row(
+                                children: [
+                                  Icon(Icons.access_time_rounded,
+                                      size: 16,
+                                      color: theme.colorScheme.primary),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      timeRange,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 14,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
                       ],
                     ),
                   ),
-                  if (canComplete)
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        showDialog(
-                          context: context,
-                          builder: (context) => TasksDialog(shift: shift),
-                        );
-                      },
-                      icon: const Icon(Icons.list_alt_rounded, size: 18),
-                      label: const Text('View Tasks'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue.shade50,
-                        foregroundColor: Colors.blue.shade700,
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          side: BorderSide(color: Colors.blue.shade200),
-                        ),
-                      ),
-                    ),
                 ],
               ),
 
-              // Skills
-              if (shift.skills != null && shift.skills!.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: _buildInfoRow('💡', 'Skills: ${shift.skills}', theme),
-                ),
-
-              // Progress Note
-              if (shift.shiftProgressNote != null &&
-                  shift.shiftProgressNote!.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.surfaceContainerHighest
-                          .withValues(alpha: 0.3),
-                      borderRadius: BorderRadius.circular(12),
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    // View Details Button
+                    SizedBox(
+                      height: 32,
+                      child: OutlinedButton(
+                        onPressed: () => _showShiftDetails(shift, theme),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: theme.colorScheme.primary,
+                          side: BorderSide(
+                              color:
+                                  theme.colorScheme.primary.withOpacity(0.5)),
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        child: const Text('View Details',
+                            style: TextStyle(fontSize: 13)),
+                      ),
                     ),
-                    child: _buildInfoRow('📝', shift.shiftProgressNote!, theme),
-                  ),
+
+                    // View Tasks Button (if applicable)
+                    if (canComplete) ...[
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        height: 32,
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            showDialog(
+                              context: context,
+                              builder: (context) => TasksDialog(shift: shift),
+                            );
+                          },
+                          icon: const Icon(Icons.list_alt_rounded, size: 16),
+                          label: const Text('View Tasks',
+                              style: TextStyle(fontSize: 13)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue.shade50,
+                            foregroundColor: Colors.blue.shade700,
+                            elevation: 0,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              side: BorderSide(color: Colors.blue.shade200),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
+              ),
 
               const SizedBox(height: 12),
 
@@ -627,6 +720,110 @@ class _ShiftPageState extends State<ShiftPage> {
     );
   }
 
+  void _showShiftDetails(Shift shift, ThemeData theme) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.3,
+        maxChildSize: 0.9,
+        expand: false,
+        builder: (context, scrollController) => Container(
+          padding: const EdgeInsets.all(24),
+          child: ListView(
+            controller: scrollController,
+            children: [
+              // Handle Bar
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 20),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+
+              Text(
+                'Shift Details',
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Center(
+                  child: _buildStatusTag(
+                      shift.statusDisplayText, shift.statusColor)),
+              const SizedBox(height: 32),
+
+              _buildDetailItem(theme, 'Client Name', shift.clientName ?? 'N/A'),
+              _buildDetailItem(
+                  theme, 'Location', shift.clientLocation ?? 'N/A'),
+              _buildDetailItem(
+                  theme, 'Service Type', shift.clientServiceType ?? 'N/A'),
+              _buildDetailItem(
+                  theme, 'Skills Required', shift.skills ?? 'None specified'),
+
+              if (shift.shiftProgressNote != null &&
+                  shift.shiftProgressNote!.isNotEmpty)
+                _buildDetailItem(
+                    theme, 'Progress Note', shift.shiftProgressNote!),
+
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(context),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Close'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailItem(ThemeData theme, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: theme.colorScheme.onSurface.withOpacity(0.6),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.5,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: theme.textTheme.bodyLarge?.copyWith(
+              fontSize: 16,
+            ),
+          ),
+          const Divider(height: 24),
+        ],
+      ),
+    );
+  }
+
   Widget _buildStatusTag(String text, Color color) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -643,21 +840,6 @@ class _ShiftPageState extends State<ShiftPage> {
           fontSize: 12,
         ),
       ),
-    );
-  }
-
-  Widget _buildInfoRow(String icon, String text, ThemeData theme) {
-    return Row(
-      children: [
-        Text(icon, style: const TextStyle(fontSize: 16)),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            text,
-            style: theme.textTheme.bodyMedium,
-          ),
-        ),
-      ],
     );
   }
 

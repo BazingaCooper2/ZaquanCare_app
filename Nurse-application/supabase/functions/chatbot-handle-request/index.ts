@@ -60,7 +60,13 @@ serve(async (req) => {
     // ------------------------------------------------------------------------
     // Insert request into DB
     // ------------------------------------------------------------------------
-    const requestRecord = await createShiftChangeRequest({
+    // ------------------------------------------------------------------------
+    // Insert request into DB
+    // ------------------------------------------------------------------------
+    let requestRecord: any;
+
+    // A. Always log to shift_change_requests (for supervisor dashboard queues)
+    requestRecord = await createShiftChangeRequest({
       emp_id,
       request_type: intent_type,
       requested_start_time: start_time ?? null,
@@ -70,76 +76,36 @@ serve(async (req) => {
       signature_url: signature_url ?? null,
     });
 
+    // B. If it's a leave request, ALSO insert into 'leaves' table
+    if (intent_type === "call_in_sick" || intent_type === "emergency_leave") {
+      const { createLeaveRecord } = await import("./db.ts");
+      await createLeaveRecord({
+        emp_id,
+        leave_type: intent_type,
+        leave_reason: message,
+        leave_start_date: new Date().toISOString().slice(0, 10),
+        leave_end_date: new Date().toISOString().slice(0, 10), // Single day for now
+        // If times are provided, use them, otherwise null (full day implied or TBD)
+        leave_start_time: start_time ?? null,
+        leave_end_time: end_time ?? null,
+      });
+    }
+
     // ------------------------------------------------------------------------
     // Update shift status
     // ------------------------------------------------------------------------
     await updateShiftStatus(emp_id, intent_type);
 
     // ------------------------------------------------------------------------
-    // Build email message
-    // ------------------------------------------------------------------------
-    let emailBody = "";
-
-    switch (intent_type) {
-      case "call_in_sick":
-        emailBody =
-          `${emp.full_name} is calling in sick.\n\nMessage: ${message}`;
-        break;
-
-      case "emergency_leave":
-        emailBody =
-          `${emp.full_name} has requested EMERGENCY LEAVE.\n\nMessage: ${message}`;
-        break;
-
-      case "partial_shift_change":
-        emailBody =
-          `${emp.full_name} requests a shift change.\nFrom: ${start_time}\nTo: ${end_time}\n\nMessage: ${message}`;
-        break;
-
-      case "late_notification":
-        emailBody =
-          `${emp.full_name} will be late for their shift.\n\nMessage: ${message}`;
-        break;
-
-      case "client_booking_ended_early":
-        emailBody =
-          `${emp.full_name} reports: Client booking ended early.\nStart: ${start_time}\nEnd: ${end_time}\n\nMessage: ${message}`;
-        break;
-
-      case "client_not_home":
-        emailBody =
-          `${emp.full_name} reports: Client not home.\n\nMessage: ${message}`;
-        break;
-
-      case "client_cancelled":
-        emailBody =
-          `${emp.full_name} reports: Client cancelled.\n\nMessage: ${message}`;
-        break;
-
-      default:
-        emailBody =
-          `${emp.full_name} submitted a request.\n\nMessage: ${message}`;
-    }
-
-    // ------------------------------------------------------------------------
-    // Send email
-    // ------------------------------------------------------------------------
-    console.log(`📧 Sending email → ${emp.supervisor_email}`);
-    const emailSent = await sendEmail(
-      emp.supervisor_email,
-      "Nurse Shift / Client Update",
-      emailBody,
-    );
-
-    // ------------------------------------------------------------------------
-    // Return final response
+    // Return final response (email will be sent from Flutter app via SMTP)
     // ------------------------------------------------------------------------
     return new Response(
       JSON.stringify({
         ok: true,
         request_id: requestRecord?.id ?? null,
-        email_sent: emailSent.ok,
         supervisor: emp.supervisor_name,
+        supervisor_email: emp.supervisor_email,
+        employee_name: emp.full_name,
         type: intent_type,
       }),
       {

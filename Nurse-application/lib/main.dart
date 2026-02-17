@@ -8,6 +8,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 
 import 'providers/theme_provider.dart';
 import 'pages/splash_page.dart';
+import 'widgets/custom_loading_screen.dart';
 
 /// ✅ Global Supabase client
 late final SupabaseClient supabase;
@@ -37,83 +38,148 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   );
 }
 
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  runApp(const AppRoot());
+}
 
-  try {
-    // ✅ Initialize Firebase first
-    await Firebase.initializeApp();
+class AppRoot extends StatefulWidget {
+  const AppRoot({super.key});
 
-    // ✅ Register background handler
-    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+  @override
+  State<AppRoot> createState() => _AppRootState();
+}
 
-    // ✅ Initialize Supabase (session persistence is handled automatically)
-    await Supabase.initialize(
-      url: 'https://asbfhxdomvclwsrekdxi.supabase.co',
-      anonKey:
-          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFzYmZoeGRvbXZjbHdzcmVrZHhpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzMjI3OTUsImV4cCI6MjA2OTg5ODc5NX0.0VzbWIc-uxIDhI03g04n8HSPRQ_p01UTJQ1sg8ggigU',
-    );
+class _AppRootState extends State<AppRoot> {
+  bool _isInitialized = false;
+  String? _error;
 
-    supabase = Supabase.instance.client;
-
-    // ✅ Health check (optional, non-blocking)
-    try {
-      final test = await supabase.from('employee').select('email').limit(1);
-      debugPrint('🩺 Supabase OK: Found employees: $test');
-    } catch (e) {
-      debugPrint('⚠️ Supabase health check failed (non-critical): $e');
-    }
-
-    // ✅ Initialize notifications & FCM permissions (non-blocking)
-    try {
-      await _initLocalNotifs();
-    } catch (e) {
-      debugPrint('⚠️ Local notifications init failed (non-critical): $e');
-    }
-
-    try {
-      await _requestPermissionAndGetToken();
-    } catch (e) {
-      debugPrint('⚠️ FCM token request failed (non-critical): $e');
-    }
-
-    // ✅ Foreground notifications listener
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      debugPrint('🔥 Foreground message: ${message.data}');
-      if (message.notification != null) {
-        localNotifs.show(
-          message.hashCode,
-          message.notification?.title ?? 'Foreground Message',
-          message.notification?.body ?? 'You have a new message',
-          const NotificationDetails(
-            android: AndroidNotificationDetails(
-              'high_importance_channel',
-              'High Importance Notifications',
-              importance: Importance.max,
-              priority: Priority.high,
-            ),
-          ),
-        );
-      }
-    });
-
-    // ✅ Handle tap on background notification
-    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-      debugPrint('📲 Notification tapped: ${message.data}');
-      // You can navigate to a specific page here if needed
-    });
-  } catch (e, st) {
-    debugPrint("❌ Critical initialization error: $e\n$st");
-    // Continue anyway - app should still start even if some services fail
+  @override
+  void initState() {
+    super.initState();
+    _initApp();
   }
 
-  // ✅ Always run the app, even if initialization had errors
-  runApp(
-    ChangeNotifierProvider(
+  Future<void> _initApp() async {
+    try {
+      // ✅ Initialize Firebase first
+      await Firebase.initializeApp();
+
+      // ✅ Register background handler
+      FirebaseMessaging.onBackgroundMessage(
+          _firebaseMessagingBackgroundHandler);
+
+      // ✅ Initialize Supabase
+      await Supabase.initialize(
+        url: 'https://asbfhxdomvclwsrekdxi.supabase.co',
+        anonKey:
+            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFzYmZoeGRvbXZjbHdzcmVrZHhpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzMjI3OTUsImV4cCI6MjA2OTg5ODc5NX0.0VzbWIc-uxIDhI03g04n8HSPRQ_p01UTJQ1sg8ggigU',
+      );
+
+      supabase = Supabase.instance.client;
+
+      // ✅ Health check (optional)
+      try {
+        await supabase.from('employee').select('email').limit(1);
+        debugPrint('🩺 Supabase OK');
+      } catch (e) {
+        debugPrint('⚠️ Supabase health check failed (non-critical): $e');
+      }
+
+      // ✅ Initialize notifications
+      try {
+        await _initLocalNotifs();
+      } catch (e) {
+        debugPrint('⚠️ Local notifications init failed: $e');
+      }
+
+      try {
+        await _requestPermissionAndGetToken();
+      } catch (e) {
+        debugPrint('⚠️ FCM token request failed: $e');
+      }
+
+      // ✅ Foreground ID notifications listener
+      FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+        debugPrint('🔥 Foreground message: ${message.data}');
+        if (message.notification != null) {
+          localNotifs.show(
+            message.hashCode,
+            message.notification?.title ?? 'Foreground Message',
+            message.notification?.body ?? 'You have a new message',
+            const NotificationDetails(
+              android: AndroidNotificationDetails(
+                'high_importance_channel',
+                'High Importance Notifications',
+                importance: Importance.max,
+                priority: Priority.high,
+              ),
+            ),
+          );
+        }
+      });
+
+      // ✅ Handle tap on background notification
+      FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+        debugPrint('📲 Notification tapped: ${message.data}');
+      });
+
+      if (mounted) {
+        setState(() {
+          _isInitialized = true;
+        });
+      }
+    } catch (e, st) {
+      debugPrint("❌ Critical initialization error: $e\n$st");
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) {
+      return MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.error_outline, size: 60, color: Colors.red),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Initialization Error',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(_error!, textAlign: TextAlign.center),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (!_isInitialized) {
+      return const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: CustomLoadingScreen(
+          message: 'Starting ZaqenCare...',
+        ),
+      );
+    }
+
+    return ChangeNotifierProvider(
       create: (_) => ThemeProvider(),
       child: const MyApp(),
-    ),
-  );
+    );
+  }
 }
 
 /// ✅ Local notifications setup

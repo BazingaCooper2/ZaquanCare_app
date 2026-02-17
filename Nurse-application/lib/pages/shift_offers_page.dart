@@ -5,6 +5,7 @@ import '../models/shift_offer_record.dart';
 import '../models/employee.dart';
 import '../services/shift_offers_service.dart';
 import '../main.dart';
+import '../widgets/custom_loading_screen.dart';
 
 class ShiftOffersPage extends StatefulWidget {
   final Employee employee;
@@ -173,16 +174,19 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
           ),
         ],
       ),
-      body: Column(
-        children: [
-          // Statistics Card
-          _buildStatisticsCard(theme),
+      body: _isLoading
+          ? const CustomLoadingScreen(
+              message: 'Loading offers...',
+              isOverlay: true,
+            )
+          : Column(
+              children: [
+                // Statistics Card
+                _buildStatisticsCard(theme),
 
-          // Tab Views
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : TabBarView(
+                // Tab Views
+                Expanded(
+                  child: TabBarView(
                     controller: _tabController,
                     children: [
                       _buildOffersList(_allOffers, 'No offers yet'),
@@ -193,9 +197,9 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
                           _todayOffers, 'No offers received today'),
                     ],
                   ),
-          ),
-        ],
-      ),
+                ),
+              ],
+            ),
     );
   }
 
@@ -642,8 +646,8 @@ class _ShiftOffersPageState extends State<ShiftOffersPage>
     } else {
       setState(() => _isLoading = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Failed to update offer status'),
+        const SnackBar(
+          content: Text('Failed to update offer status'),
           backgroundColor: Colors.red,
           behavior: SnackBarBehavior.floating,
         ),

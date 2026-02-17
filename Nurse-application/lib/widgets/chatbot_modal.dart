@@ -2,9 +2,11 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:nurse_tracking_app/services/email_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nurse_tracking_app/services/chatbot_service.dart';
 import 'package:nurse_tracking_app/services/session.dart';
+import 'package:nurse_tracking_app/models/shift.dart';
 import 'package:signature/signature.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../data/faq_data.dart';
@@ -126,6 +128,41 @@ class _ChatbotModalState extends State<ChatbotModal> {
     _scrollToBottom();
     await _saveChatHistory();
 
+    // Check for intents that require UI interaction
+    final intent = ChatbotService.detectIntent(message);
+
+    if (intent.type == IntentType.clientBookingEndedEarly) {
+      setState(() {
+        _isLoading = false;
+      });
+      _showClientBookingEndedEarlyDialog();
+      return;
+    }
+
+    if (intent.type == IntentType.clientNotHome) {
+      setState(() {
+        _isLoading = false;
+      });
+      _showClientIssueConfirmationDialog('Client not home');
+      return;
+    }
+
+    if (intent.type == IntentType.clientCancelled) {
+      setState(() {
+        _isLoading = false;
+      });
+      _showClientIssueConfirmationDialog('Client cancelled');
+      return;
+    }
+
+    if (intent.type == IntentType.callInSick) {
+      setState(() {
+        _isLoading = false;
+      });
+      _showLeaveRequestDialog();
+      return;
+    }
+
     // Get employee ID
     final empId = await SessionManager.getEmpId();
 
@@ -186,6 +223,7 @@ class _ChatbotModalState extends State<ChatbotModal> {
   }
 
   void _onFAQSelected(String question) async {
+    debugPrint('FAQ Selected: $question');
     // Find the FAQ to check if it has an action
     final faq = FAQData.faqs.firstWhere(
       (f) => f['question'] == question,
@@ -193,16 +231,22 @@ class _ChatbotModalState extends State<ChatbotModal> {
     );
 
     final action = faq['action'];
+    debugPrint('FAQ Action: $action');
+
     if (action == 'leave') {
       _showLeaveRequestDialog();
     } else if (action == 'shift_change') {
       _showShiftChangeDialog();
     } else if (action == 'client_issue') {
+      debugPrint('Client Issue Action triggered');
       // Check which client issue it is
       if (question == 'Client booking ended early') {
+        debugPrint('Calling _showClientBookingEndedEarlyDialog');
         _showClientBookingEndedEarlyDialog();
+      } else if (question == 'Client not home' ||
+          question == 'Client cancelled') {
+        _showClientIssueConfirmationDialog(question);
       } else {
-        // Client not home or Client cancelled - send directly
         _sendMessage(question);
       }
     } else if (action == 'delay') {
@@ -299,6 +343,15 @@ class _ChatbotModalState extends State<ChatbotModal> {
                           ],
                         ),
                       ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    '⚠️ Please tap "Save" to confirm your signature before submitting.',
+                    style: TextStyle(
+                      color: Colors.orange,
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic,
                     ),
                   ),
                   if (signatureImage != null) ...[
@@ -587,63 +640,624 @@ class _ChatbotModalState extends State<ChatbotModal> {
     );
   }
 
-  void _showClientBookingEndedEarlyDialog() {
-    final startTimeController = TextEditingController();
-    final endTimeController = TextEditingController();
+  Future<Map<String, dynamic>?> _fetchCurrentShift() async {
+    try {
+      final empId = await SessionManager.getEmpId();
+      debugPrint('Fetching current shift for Emp ID: $empId');
+
+      if (empId == null) {
+        debugPrint('Emp ID is null');
+        return null;
+      }
+
+      final supabase = Supabase.instance.client;
+
+      // 1. Try RPC first
+      try {
+        final response =
+            await supabase.rpc('get_active_shift', params: {'p_emp_id': empId});
+
+        debugPrint('get_active_shift response: $response');
+
+        if (response != null) {
+          Map<String, dynamic>? shiftData;
+          if (response is List) {
+            if (response.isNotEmpty) {
+              shiftData = Map<String, dynamic>.from(response.first as Map);
+            }
+          } else if (response is Map) {
+            shiftData = Map<String, dynamic>.from(response as Map);
+          }
+
+          if (shiftData != null) {
+            return await _ensureClientDetails(shiftData);
+          }
+        }
+      } catch (e) {
+        debugPrint('RPC get_active_shift failed: $e');
+      }
+
+      // 2. Fallback: Manual Date/Time check for "Scheduled" shifts that might be blocked by strict RPC logic
+      debugPrint('Fallback: Checking scheduled shifts for today...');
+      final now = DateTime.now();
+      final todayStr =
+          "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+
+      try {
+        final fallbackResponse = await supabase
+            .from('shift')
+            .select('*, client:client_id(*)')
+            .eq('emp_id', empId)
+            .eq('date', todayStr)
+            .eq('shift_status', 'scheduled');
+
+        debugPrint('Fallback response: $fallbackResponse');
+
+        if (fallbackResponse != null &&
+            fallbackResponse is List &&
+            fallbackResponse.isNotEmpty) {
+          // Find the "best" match (closest start time that hasn't ended)
+          for (var s in fallbackResponse) {
+            final shift = s as Map<String, dynamic>;
+            if (_isShiftActiveOrUpcoming(
+                shift['shift_start_time'], shift['shift_end_time'])) {
+              debugPrint(
+                  'Found active/upcoming fallback shift: ${shift['shift_id']}');
+              return await _ensureClientDetails(shift);
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Fallback query failed: $e');
+      }
+
+      return null;
+    } catch (e) {
+      debugPrint('Error fetching current shift: $e');
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>> _ensureClientDetails(
+      Map<String, dynamic> shiftData) async {
+    if (shiftData['client_id'] != null &&
+        (shiftData['client_name'] == null || shiftData['client'] == null)) {
+      try {
+        final supabase = Supabase.instance.client;
+        final clientRes = await supabase
+            .from('client')
+            .select('name, service_type')
+            .eq('client_id', shiftData['client_id'])
+            .single();
+
+        shiftData['client'] = clientRes;
+        shiftData['client_name'] = clientRes['name'];
+        shiftData['client_service_type'] = clientRes['service_type'];
+      } catch (e) {
+        debugPrint('Error fetching client details: $e');
+      }
+    }
+    return shiftData;
+  }
+
+  bool _isShiftActiveOrUpcoming(String? startStr, String? endStr) {
+    if (startStr == null || endStr == null) return false;
+    try {
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+
+      final startParts = startStr.split(':');
+      final endParts = endStr.split(':');
+
+      final start = today.add(Duration(
+          hours: int.parse(startParts[0]), minutes: int.parse(startParts[1])));
+      final end = today.add(Duration(
+          hours: int.parse(endParts[0]), minutes: int.parse(endParts[1])));
+
+      // Allow if end time is in the future
+      return end.isAfter(now);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  Future<void> _submitShiftChangeRequest({
+    required String requestType,
+    required Shift shift,
+    required String reason,
+    required Uint8List signatureImage,
+    required String newShiftStatus,
+    required Function(bool) setLoading,
+  }) async {
+    setLoading(true);
+    try {
+      final supabase = Supabase.instance.client;
+      final empId = await SessionManager.getEmpId();
+
+      // 1. Upload Signature
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final fileName = 'shift_change_signature_${shift.shiftId}_$timestamp.png';
+      String? signatureUrl;
+
+      try {
+        await supabase.storage
+            .from(
+                'sick_leave_signatures') // Reusing bucket as per existing code
+            .uploadBinary(fileName, signatureImage);
+        signatureUrl = supabase.storage
+            .from('sick_leave_signatures')
+            .getPublicUrl(fileName);
+      } catch (e) {
+        debugPrint('Error uploading signature: $e');
+        // Continue without signature URL if upload fails, but we have image for email
+      }
+
+      // 2. Insert into shift_change_requests
+      await supabase.from('shift_change_requests').insert({
+        'emp_id': empId,
+        'original_shift_id': shift.shiftId,
+        'request_type': requestType,
+        'reason': reason,
+        'status': 'pending',
+        'signature_url': signatureUrl,
+        'created_at': DateTime.now().toUtc().toIso8601String(),
+      });
+
+      // 3. Update Shift Status (Clock Out & End Early/Cancel)
+      final nowUtc = DateTime.now().toUtc();
+      await supabase.from('shift').update({
+        'clock_out': nowUtc.toIso8601String(),
+        'shift_status': newShiftStatus,
+        'shift_progress_note': '$requestType: $reason'
+      }).eq('shift_id', shift.shiftId);
+
+      // 4. Clock out from time_logs if exists
+      // We need to find the active time log for this user
+      final activeLog = await supabase
+          .from('time_logs')
+          .select('id, clock_in_time')
+          .eq('emp_id', empId!)
+          .filter('clock_out_time', 'is', null)
+          .maybeSingle();
+
+      if (activeLog != null) {
+        final clockInTime = DateTime.parse(activeLog['clock_in_time']);
+        final totalHours = (nowUtc.difference(clockInTime).inMinutes / 60.0)
+            .toStringAsFixed(2);
+
+        await supabase.from('time_logs').update({
+          'clock_out_time': nowUtc.toIso8601String(),
+          'total_hours': double.parse(totalHours),
+          'updated_at': nowUtc.toIso8601String(),
+        }).eq('id', activeLog['id']);
+      }
+
+      // 5. Send Email
+      // Fetch employee details for email
+      final employeeRes = await supabase
+          .from('employee')
+          .select('first_name, last_name')
+          .eq('emp_id', empId)
+          .single();
+      final employeeName =
+          '${employeeRes['first_name']} ${employeeRes['last_name'] ?? ''}'
+              .trim();
+
+      await EmailService.sendShiftChangeRequestEmail(
+        requestType: requestType.replaceAll('_', ' '),
+        clientName: shift.clientName ?? 'Unknown Client',
+        shiftDate: shift.date ?? 'Unknown Date',
+        shiftTime: shift.formattedTimeRange,
+        reason: reason,
+        employeeName: employeeName,
+        signatureUrl: signatureUrl,
+        signatureImage: signatureImage,
+      );
+
+      if (mounted) {
+        Navigator.of(context).pop(); // Close dialog
+
+        // Add bot success message directly
+        setState(() {
+          _messages.add(ChatMessage(
+            text: 'Shift has been updated and supervisor has been notified',
+            isBot: true,
+            timestamp: DateTime.now(),
+          ));
+          _isLoading = false;
+        });
+        _scrollToBottom();
+        await _saveChatHistory();
+      }
+    } catch (e) {
+      debugPrint('Error submitting request: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setLoading(false);
+      }
+    }
+  }
+
+  void _showClientBookingEndedEarlyDialog() async {
+    // Show loading indicator first
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(child: CircularProgressIndicator()),
+    );
+
+    final shiftData = await _fetchCurrentShift();
+
+    if (mounted) {
+      Navigator.of(context).pop(); // Dismiss loading
+    }
+
+    if (shiftData == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No active shift found to end early.')),
+        );
+      }
+      return;
+    }
+
+    final shift = Shift.fromJson(shiftData);
+    if (mounted) {
+      _showEndShiftConfirmationDialog(shift);
+    }
+  }
+
+  String _formatStatus(String? status) {
+    if (status == null) return "N/A";
+    if (status == 'in_progress') return "In Progress";
+    if (status == 'scheduled') return "Scheduled";
+    if (status == 'completed') return "Completed";
+    return status
+        .split('_')
+        .map((word) => word[0].toUpperCase() + word.substring(1))
+        .join(' ');
+  }
+
+  Color _getStatusColor(String? status) {
+    if (status == 'in_progress') return Colors.green;
+    if (status == 'scheduled') return Colors.blue;
+    if (status == 'completed') return Colors.grey;
+    return Colors.blueGrey;
+  }
+
+  void _showEndShiftConfirmationDialog(Shift shift) {
+    final signatureController = SignatureController(
+      penStrokeWidth: 3,
+      penColor: Colors.black,
+      exportBackgroundColor: Colors.white,
+    );
+    bool isSubmitting = false;
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Client Booking Ended Early'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Please provide the booking times:'),
-              const SizedBox(height: 16),
-              TextField(
-                controller: startTimeController,
-                decoration: const InputDecoration(
-                  labelText: 'Start Time',
-                  hintText: 'e.g., 9am or 9:00',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: endTimeController,
-                decoration: const InputDecoration(
-                  labelText: 'End Time',
-                  hintText: 'e.g., 5pm or 17:00',
-                  border: OutlineInputBorder(),
-                ),
+              const Expanded(child: Text('End Shift Early')),
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  signatureController.dispose();
+                  Navigator.of(context).pop();
+                },
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
               ),
             ],
           ),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue.shade100),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Client: ${shift.clientName}',
+                            style:
+                                const TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Text('Program: ${shift.clientServiceType ?? "N/A"}'),
+                        const SizedBox(height: 4),
+                        Text('Time: ${shift.formattedTimeRange}'),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            const Text('Status: ',
+                                style: TextStyle(fontWeight: FontWeight.w500)),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: _getStatusColor(shift.shiftStatus),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                _formatStatus(shift.shiftStatus),
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 12),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Client booking ended early. Please sign below to confirm ending your shift now.',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('Signature:'),
+                  const SizedBox(height: 8),
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade400),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    height: 150,
+                    child: Signature(
+                      controller: signatureController,
+                      backgroundColor: Colors.grey.shade100,
+                    ),
+                  ),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: () => signatureController.clear(),
+                      child: const Text('Clear Signature'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                signatureController.dispose();
+                Navigator.of(context).pop();
+              },
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: isSubmitting
+                  ? null
+                  : () async {
+                      if (signatureController.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Please sign to confirm.')),
+                        );
+                        return;
+                      }
+
+                      final signature = await signatureController.toPngBytes();
+                      if (signature == null) return;
+
+                      _submitShiftChangeRequest(
+                        requestType: 'client_booking_ended_early',
+                        shift: shift,
+                        reason: 'Client booking ended early',
+                        signatureImage: signature,
+                        newShiftStatus: 'completed',
+                        setLoading: (loading) {
+                          setDialogState(() => isSubmitting = loading);
+                        },
+                      );
+                    },
+              child: isSubmitting
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Confirm End Shift'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
+      ),
+    );
+  }
+
+  Future<void> _showClientIssueConfirmationDialog(String issueType) async {
+    setState(() => _isLoading = true);
+    final shiftMap = await _fetchCurrentShift();
+    setState(() => _isLoading = false);
+
+    if (shiftMap == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('No active shift found for $issueType.')),
+        );
+      }
+      return;
+    }
+
+    final shiftObj = Shift.fromJson(shiftMap);
+    if (!mounted) return;
+
+    final signatureController = SignatureController(
+      penStrokeWidth: 3,
+      penColor: Colors.black,
+      exportBackgroundColor: Colors.white,
+    );
+    bool isSubmitting = false;
+
+    // Determine dialog title and message based on issue type
+    String dialogTitle = issueType;
+    String dialogMessage =
+        '$issueType. Please sign below to confirm ending your shift now.';
+
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(child: Text(dialogTitle)),
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  signatureController.dispose();
+                  Navigator.of(context).pop();
+                },
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
+            ],
           ),
-          ElevatedButton(
-            onPressed: () {
-              final start = startTimeController.text.trim();
-              final end = endTimeController.text.trim();
-              if (start.isEmpty || end.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                      content: Text('Please provide both start and end times')),
-                );
-                return;
-              }
-              Navigator.of(context).pop();
-              _sendMessage(
-                  'Client booking ended early. Start time: $start, End time: $end');
-            },
-            child: const Text('Submit'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue.shade100),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Client: ${shiftObj.clientName ?? "N/A"}',
+                            style:
+                                const TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Text('Program: ${shiftObj.clientServiceType ?? "N/A"}'),
+                        const SizedBox(height: 4),
+                        Text('Time: ${shiftObj.formattedTimeRange}'),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            const Text('Status: ',
+                                style: TextStyle(fontWeight: FontWeight.w500)),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: _getStatusColor(shiftObj.shiftStatus),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                _formatStatus(shiftObj.shiftStatus),
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 12),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    dialogMessage,
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('Signature:'),
+                  const SizedBox(height: 8),
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade400),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    height: 150,
+                    child: Signature(
+                      controller: signatureController,
+                      backgroundColor: Colors.grey.shade100,
+                    ),
+                  ),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed: () => signatureController.clear(),
+                      child: const Text('Clear Signature'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () {
+                signatureController.dispose();
+                Navigator.of(context).pop();
+              },
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: isSubmitting
+                  ? null
+                  : () async {
+                      if (signatureController.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Please sign to confirm.')),
+                        );
+                        return;
+                      }
+
+                      final signature = await signatureController.toPngBytes();
+                      if (signature == null) return;
+
+                      String requestTypeCode = 'other';
+                      if (issueType == 'Client not home')
+                        requestTypeCode = 'client_not_home';
+                      if (issueType == 'Client cancelled')
+                        requestTypeCode = 'client_cancelled';
+
+                      _submitShiftChangeRequest(
+                        requestType: requestTypeCode,
+                        shift: shiftObj,
+                        reason: issueType,
+                        signatureImage: signature,
+                        newShiftStatus: 'cancelled',
+                        setLoading: (loading) {
+                          setDialogState(() => isSubmitting = loading);
+                        },
+                      );
+                    },
+              child: isSubmitting
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(
+                      'Confirm ${issueType == 'Client not home' ? 'Not Home' : issueType == 'Client cancelled' ? 'Cancellation' : 'Action'}'),
+            ),
+          ],
+        ),
       ),
     );
   }

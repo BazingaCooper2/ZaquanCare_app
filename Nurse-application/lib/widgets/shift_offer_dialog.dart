@@ -13,13 +13,13 @@ class ShiftOfferDialog extends StatefulWidget {
   final VoidCallback? onRejected;
 
   const ShiftOfferDialog({
-    Key? key,
+    super.key,
     required this.offer,
     required this.empId,
     required this.apiService,
     this.onAccepted,
     this.onRejected,
-  }) : super(key: key);
+  });
 
   @override
   State<ShiftOfferDialog> createState() => _ShiftOfferDialogState();
